@@ -23,6 +23,7 @@ from ..llm.parse import parse_json_model
 from ..tools.registry import ToolRegistry
 from ..types import Message
 from .models import ImprovementProposal
+from .plan_validator import validate_plan_tool
 
 ORCHESTRATOR_PROMPT = """You are the improvement Orchestrator: an analyst, not an implementer.
 
@@ -34,24 +35,33 @@ Rules:
 - Use the read-only tools (read_file, search_code, grep, list_dir, glob) to inspect the
   REAL source before proposing. Do not guess.
 - Ground every claim in inspectable evidence: a code location, a trajectory record, or a test.
+- evidence[] MUST be non-empty: include at least one entry with source_type "code" whose
+  reference is a concrete file path (ideally file:line) you actually inspected. A proposal
+  with no evidence will be rejected by the policy gate — never leave evidence empty.
 - You must NOT write or modify any code.
 - Score benefit/risk/effort 1-5 and confidence 0.0-1.0. Propose a decision
   (proceed / abstain / needs_human); a deterministic policy gate makes the final call.
 - Prefer abstain when evidence is weak or expected value is low.
+- BEFORE emitting the proposal, call `validate_plan` with your `tasks` (a list of
+  {id, dependencies}). If it reports problems (duplicate ids, unknown dependencies,
+  cycles, no runnable root), FIX the task graph and validate again. Only output the
+  final proposal once validate_plan passes.
 
 When done, output ONLY the proposal as ONE JSON object in a ```json code block. Field types:
 - evidence[]: {source_type: trajectory|test|benchmark|code|log, reference: str, observation: str}
-- tasks[]: {id: str, description: str, dependencies: [str], acceptance_criteria_ids: [str]}
+- tasks[]: {id: str, description: str, dependencies: [str]} — each `description` states
+  clearly WHAT THAT TASK SHOULD DO (its goal); the Reviewer checks each task against
+  it from fixed perspectives (inputs/outputs, dataflow/schema, goal, code quality).
 - benefit/risk/effort: int 1-5; confidence: float 0-1
 - decision: proceed|abstain|needs_human
-- acceptance_criteria[]: {id, description, mode: red_green|invariant|metric_improvement|
-  non_regression|manual, verification_method: existing_test|generated_test|static_check|
-  benchmark|manual, required: bool}
-- evaluation_plan: {primary_metric: null OR {name, direction: increase|decrease, min_delta: float},
-  guardrail_metrics: [Metric], scenarios: [str], run_count: int}
+- delivery_run[]: str — concrete shell commands that exercise the CHANGED system in
+  ONE run (e.g. "python3 -m mini_agent 'add 2 3' 'add x y'"). The Deliverer runs
+  these once and judges the output; use commands that actually run in the target.
+- delivery_checklist[]: str — the whole loop's integration acceptance: what the
+  Deliverer must confirm from that run's output (e.g. "add 2 3 prints 5", "bad input
+  is handled without a crash").
 - also: summary, problem_statement, goals[], non_goals[], affected_components[],
-  dependencies[], decision_reason, rollback_plan, alternatives_considered[]
-Use null for primary_metric and [] for guardrail_metrics unless the change is metric-based."""
+  dependencies[], decision_reason, rollback_plan, alternatives_considered[]"""
 
 
 class Orchestrator:
@@ -60,12 +70,18 @@ class Orchestrator:
         self.cwd = cwd
         # analyst gets read-only tools ONLY — it must never modify code.
         self.registry = _read_only_registry(registry)
+        # plus a deterministic DAG check it must run before finalizing its plan.
+        self.registry.register(validate_plan_tool)
 
     async def analyze(
-        self, intent: str, trajectory: list[dict[str, Any]], max_turns: int = 12
+        self,
+        intent: str,
+        trajectory: list[dict[str, Any]],
+        loop_history: list[str] | None = None,
+        max_turns: int = 12,
     ) -> ImprovementProposal:
         # 1. run the ReAct loop; collect its final text (the proposal JSON).
-        text = await self._investigate(intent, trajectory, max_turns)
+        text = await self._investigate(intent, trajectory, loop_history or [], max_turns)
         # 2. validate; on schema failure, do ONE self-correcting repair pass.
         try:
             return parse_json_model(text, ImprovementProposal)
@@ -73,15 +89,33 @@ class Orchestrator:
             fixed = await self._repair(text, str(exc))
             return parse_json_model(fixed, ImprovementProposal)
 
+    async def revise(self, proposal: ImprovementProposal, problem: str) -> ImprovementProposal:
+        """Re-generate the proposal to fix a specific problem (e.g. an invalid DAG)."""
+        # feed the problem + the previous proposal back; ask for a corrected one.
+        msg = (
+            f"Your previous proposal had a problem that must be fixed:\n{problem}\n\n"
+            f"Previous proposal:\n{proposal.model_dump_json(indent=2)}\n\n"
+            "Output ONLY a corrected proposal as a single ```json block — fix the "
+            "problem and keep everything else valid."
+        )
+        text = await collect_text(
+            self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
+        )
+        return parse_json_model(text, ImprovementProposal)
+
     async def _investigate(
-        self, intent: str, trajectory: list[dict[str, Any]], max_turns: int
+        self,
+        intent: str,
+        trajectory: list[dict[str, Any]],
+        loop_history: list[str],
+        max_turns: int,
     ) -> str:
         text = ""
         async for event in query(
             client=self.client,
             registry=self.registry,
             system_prompt=ORCHESTRATOR_PROMPT,
-            user_message=_build_request(intent, trajectory),
+            user_message=_build_request(intent, trajectory, loop_history),
             cwd=self.cwd,
             max_turns=max_turns,
         ):
@@ -112,12 +146,18 @@ def _read_only_registry(registry: ToolRegistry) -> ToolRegistry:
     return read_only
 
 
-def _build_request(intent: str, trajectory: list[dict[str, Any]]) -> str:
+def _build_request(
+    intent: str, trajectory: list[dict[str, Any]], loop_history: list[str]
+) -> str:
     lines = [f"Improvement intent:\n{intent}", "", "Execution trajectory (evidence records):"]
     if trajectory:
         lines += [f"- {json.dumps(rec, ensure_ascii=False)}" for rec in trajectory[:100]]
     else:
         lines.append("- (no trajectory provided)")
+    # earlier loops in THIS run: what was tried and how it went — plan the NEXT step.
+    if loop_history:
+        lines += ["", "Previous loops in this run (plan the NEXT improvement accordingly):"]
+        lines += [f"- {h}" for h in loop_history]
     lines.append(
         "\nInvestigate the codebase with the read-only tools, then output the "
         "ImprovementProposal JSON."

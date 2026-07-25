@@ -136,6 +136,59 @@ async def _write_file(args: dict, context: ToolContext) -> ToolResult:
     return ToolResult(content=f"Wrote {len(content)} chars to {raw_path}")
 
 
+async def _edit_file(args: dict, context: ToolContext) -> ToolResult:
+    # Anchored replace: swap an EXACT substring for another. Because the match
+    # must be found (and unique unless replace_all), the model structurally cannot
+    # silently drop the rest of the file — the failure mode `write_file` allows.
+    raw_path = str(args.get("path") or "").strip()
+    if not raw_path:
+        return ToolResult(content="Error: 'path' is required.", is_error=True)
+    old = args.get("old_string")
+    new = args.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str):
+        return ToolResult(
+            content="Error: 'old_string' and 'new_string' must be strings.", is_error=True
+        )
+    if old == new:
+        return ToolResult(
+            content="Error: 'old_string' and 'new_string' are identical.", is_error=True
+        )
+    replace_all = bool(args.get("replace_all") or False)
+
+    path = (Path(context.cwd) / raw_path).resolve()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ToolResult(
+            content=f"Error: file not found: {raw_path}. Use write_file to create a NEW file.",
+            is_error=True,
+        )
+    except (IsADirectoryError, UnicodeDecodeError, OSError) as exc:
+        return ToolResult(content=f"Error reading '{raw_path}': {exc}", is_error=True)
+
+    count = text.count(old)
+    if count == 0:
+        return ToolResult(
+            content=f"Error: old_string not found in {raw_path}. It must match the file "
+            "EXACTLY (whitespace included). Read the file and copy the exact text.",
+            is_error=True,
+        )
+    if count > 1 and not replace_all:
+        return ToolResult(
+            content=f"Error: old_string is not unique in {raw_path} ({count} occurrences). "
+            "Add surrounding context to make it unique, or set replace_all=true.",
+            is_error=True,
+        )
+
+    updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        return ToolResult(content=f"Error writing '{raw_path}': {exc}", is_error=True)
+    where = f"{count} occurrences" if replace_all else "1 occurrence"
+    return ToolResult(content=f"Edited {raw_path} ({where} replaced).")
+
+
 async def _bash(args: dict, context: ToolContext) -> ToolResult:
     command = str(args.get("command") or "").strip()
     if not command:
@@ -268,6 +321,32 @@ write_file_tool = Tool(
 )
 
 
+edit_file_tool = Tool(
+    name="edit_file",
+    description=(
+        "Edit an EXISTING file by replacing an exact substring (old_string) with "
+        "new_string. PREFER this over write_file for changing existing files: it "
+        "only touches the matched region and leaves the rest of the file intact. "
+        "old_string must match the file exactly and be unique (or set replace_all). "
+        "Use write_file only to create a brand-new file."
+    ),
+    parameters=object_schema(
+        {
+            "path": {"type": "string", "description": "File to edit"},
+            "old_string": {"type": "string", "description": "Exact text to replace"},
+            "new_string": {"type": "string", "description": "Replacement text"},
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace every occurrence (default false: require a unique match)",
+            },
+        },
+        required=["path", "old_string", "new_string"],
+    ),
+    handler=_edit_file,
+    is_read_only=False,  # write operation: has side effects
+)
+
+
 bash_tool = Tool(
     name="bash",
     description=(
@@ -319,6 +398,7 @@ def get_builtin_tools() -> list[Tool]:
         glob_tool,
         grep_tool,
         write_file_tool,
+        edit_file_tool,
         bash_tool,
         save_memory_tool,
         search_code_tool,

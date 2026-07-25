@@ -29,7 +29,7 @@ class Evidence(BaseModel):
 
 
 class Finding(BaseModel):
-    # a critic's structured note about a change unit (design doc section 8).
+    # a verdict's structured note about a change unit (design doc section 8).
     severity: Literal["info", "minor", "major", "blocker"]
     location: str
     description: str
@@ -54,13 +54,17 @@ class ImprovementTask(BaseModel):
 
 
 class AcceptanceCriterion(BaseModel):
-    # a success condition + HOW it is verified (design doc section 6.3).
+    # a success condition + how thorough its generated test should be.
     id: str
     description: str
     mode: Literal["red_green", "invariant", "metric_improvement", "non_regression", "manual"]
-    verification_method: Literal[
-        "existing_test", "generated_test", "static_check", "benchmark", "manual"
-    ]
+    # rigor of the functional test the Test Agent generates:
+    #   full    -> core/framework: happy path + edges + error handling + invariants
+    #   focused -> important logic: unit test asserting key values + intermediates
+    #   basic   -> simple: one unit test on the main behavior
+    # Ignored for metric modes (verified via the runner's external benchmark hook)
+    # and manual mode (human-reviewed); the Test Agent does not auto-generate those.
+    test_level: Literal["full", "focused", "basic"] = "focused"
     required: bool = True
 
 
@@ -72,15 +76,15 @@ class EvaluationPlan(BaseModel):
     run_count: int = 1  # repeat runs for nondeterministic behavior
 
 
-class CriticReview(BaseModel):
-    # the implementation critic's verdict on a change unit.
+class ReviewResult(BaseModel):
+    # the Reviewer's verdict on a change unit.
     verdict: Literal["accept", "revise", "escalate"]
     findings: list[Finding] = Field(default_factory=list)
     summary: str = ""
 
 
 class ExecutionBlocker(BaseModel):
-    # raised when a task can't converge within bounded Writer-Critic rounds.
+    # raised when a task can't converge within bounded Writer-Reviewer rounds.
     task_id: str
     review_rounds: int
     unresolved_findings: list[Finding] = Field(default_factory=list)
@@ -111,7 +115,11 @@ class ImprovementProposal(BaseModel):
     decision: Literal["proceed", "abstain", "needs_human"]
     decision_reason: str
     acceptance_criteria: list[AcceptanceCriterion] = Field(default_factory=list)
-    evaluation_plan: EvaluationPlan
+    # ONE run of the candidate: commands whose combined output the Deliverer judges.
+    delivery_run: list[str] = Field(default_factory=list)
+    # what the Deliverer verifies against that single run's output, point by point.
+    delivery_checklist: list[str] = Field(default_factory=list)
+    evaluation_plan: EvaluationPlan | None = None
     rollback_plan: str = ""
     alternatives_considered: list[str] = Field(default_factory=list)
 

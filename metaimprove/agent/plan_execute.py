@@ -1,24 +1,27 @@
-"""Plan-and-Execute agent.
+"""Plan-and-Execute mode — Planner + the shared TaskExecutor (no review).
 
-A layer ABOVE the ReAct loop: it does NOT modify query(). Instead it
-  1. asks a Planner to decompose the goal into a task DAG,
-  2. executes tasks in dependency order (parallelizing independent ones),
-     running EACH task through the existing ReAct loop (query()),
-  3. summarizes the results.
+A layer ABOVE the ReAct loop: it decomposes the goal into a task DAG (Planner),
+then runs the DAG through the shared `TaskExecutor` with review OFF and
+independent tasks in parallel. The scheduling/worker machinery is no longer
+duplicated here; this module only wires the planner, the config, and the
+per-task message.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 from ..llm.base import LlmClient
+from ..orchestration.task_executor import (
+    ExecutorConfig,
+    TaskExecutor,
+    run_streamed,
+)
 from ..plan.models import ExecutionPlan, Task
 from ..plan.planner import Planner
 from ..prompt.assembler import PromptAssembler
 from ..tools.registry import ToolRegistry
-from .query import query
 
 
 async def plan_execute(
@@ -40,87 +43,30 @@ async def plan_execute(
         return
     yield {"type": "text_delta", "text": plan.summarize() + "\n\n"}
 
-    # one shared system prompt for every task's ReAct run.
+    # 2. EXECUTE: run the DAG through the shared executor (no review, parallel).
     system_prompt = PromptAssembler(
         cwd=cwd,
         model=client.model_name,
         provider=client.provider_name,
         tool_names=registry.list_names(),
     ).build()
+    executor = TaskExecutor(client=client, registry=registry)
+    config = ExecutorConfig(review=False, parallel=True, max_task_turns=max_task_turns)
+    async for event in run_streamed(
+        executor,
+        plan=plan,
+        cwd=cwd,
+        config=config,
+        system_prompt=system_prompt,
+        build_task_message=lambda task, pl, _fb: _task_message(pl, task),
+        memory=memory,
+        code_index=code_index,
+    ):
+        yield event
 
-    # 2. EXECUTE: loop until no task is runnable.
-    while True:
-        batch = plan.executable_tasks()
-        if not batch:
-            break
-        if len(batch) > 1:
-            yield {
-                "type": "text_delta",
-                "text": f"Running in parallel: {', '.join(t.id for t in batch)}\n",
-            }
-        # run the whole batch concurrently; independent tasks don't block each other.
-        results = await asyncio.gather(
-            *(
-                _run_task(
-                    client,
-                    registry,
-                    plan,
-                    task,
-                    cwd,
-                    memory,
-                    code_index,
-                    system_prompt,
-                    max_task_turns,
-                )
-                for task in batch
-            )
-        )
-        for task in results:
-            status = "failed" if task.status.value == "failed" else "done"
-            yield {
-                "type": "tool_result",
-                "name": f"task:{task.id}",
-                "content": task.result,
-                "is_error": status == "failed",
-            }
-
-    # 3. SUMMARIZE: combine the completed task results.
+    # 3. SUMMARIZE: the executor mutated `plan` in place, so read it back.
     yield {"type": "text_delta", "text": "\n" + _final_summary(plan)}
     yield {"type": "done", "total_turns": 0, "total_tokens": 0, "messages": []}
-
-
-async def _run_task(
-    client: LlmClient,
-    registry: ToolRegistry,
-    plan: ExecutionPlan,
-    task: Task,
-    cwd: str,
-    memory: Any,
-    code_index: Any,
-    system_prompt: str,
-    max_task_turns: int,
-) -> Task:
-    task.mark_running()
-    text = ""
-    try:
-        async for event in query(
-            client=client,
-            registry=registry,
-            system_prompt=system_prompt,
-            user_message=_task_message(plan, task),
-            cwd=cwd,
-            memory=memory,
-            code_index=code_index,
-            max_turns=max_task_turns,
-        ):
-            if event.get("type") == "text_delta":
-                text += str(event.get("text") or "")
-            elif event.get("type") == "error":
-                raise event["error"]
-        task.mark_completed(text.strip() or "(no output)")
-    except Exception as exc:  # noqa: BLE001 - a task failure shouldn't crash the plan
-        task.mark_failed(str(exc))
-    return task
 
 
 def _task_message(plan: ExecutionPlan, task: Task) -> str:

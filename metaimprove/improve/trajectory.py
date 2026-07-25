@@ -87,3 +87,20 @@ def load_trajectory(
 def list_trajectories(cwd: str, store_root: str | Path | None = None) -> list[str]:
     d = _trace_dir(cwd, store_root)
     return sorted((p.stem for p in d.glob("*.jsonl")), reverse=True) if d.exists() else []
+
+
+def load_recent_trajectory(
+    cwd: str, *, sessions: int = 3, max_records: int = 200, store_root: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """Aggregate the evidence events from the most recent `sessions` runs.
+
+    This is what the Analyzer gets grounded on: 'how the agent recently behaved',
+    newest sessions first, capped so a long history can't flood the prompt.
+    """
+    # newest sessions first, then their events oldest-to-newest within each.
+    out: list[dict[str, Any]] = []
+    for session_id in list_trajectories(cwd, store_root)[:sessions]:
+        out.extend(load_trajectory(cwd, session_id, store_root))
+        if len(out) >= max_records:
+            break
+    return out[:max_records]

@@ -16,17 +16,20 @@ from typing import Literal
 
 from .models import ImprovementProposal
 
-# acceptance criteria the pipeline can verify WITHOUT a human.
-_AUTOMATABLE = {"existing_test", "generated_test", "static_check", "benchmark"}
-
 
 @dataclass
 class GatePolicy:
     max_auto_risk: int = 3  # risk above this -> escalate to human
     min_benefit: int = 3  # benefit below this -> abstain (not worth it)
     min_confidence: float = 0.5  # confidence below this -> abstain
+    # critical parts of the improvement ENGINE itself: touching them needs a human.
     protected_paths: list[str] = field(
-        default_factory=lambda: ["ours/policy/", "ours/improve/", "pyproject.toml", ".github/"]
+        default_factory=lambda: [
+            "metaimprove/improve/",
+            "metaimprove/orchestration/",
+            "pyproject.toml",
+            ".github/",
+        ]
     )
 
 
@@ -58,8 +61,8 @@ def evaluate(proposal: ImprovementProposal, policy: GatePolicy | None = None) ->
     hit = _protected_hits(proposal, policy.protected_paths)
     if hit:
         human_reasons.append(f"touches protected paths: {', '.join(hit)}")
-    if not _has_automatable_criterion(proposal):
-        human_reasons.append("no automatically verifiable acceptance criterion")
+    if not _is_auto_verifiable(proposal):
+        human_reasons.append("no delivery_run — the Deliverer can't auto-verify it")
     if human_reasons:
         return GateDecision("needs_human", human_reasons)
 
@@ -79,8 +82,6 @@ def _protected_hits(proposal: ImprovementProposal, protected: list[str]) -> list
     ]
 
 
-def _has_automatable_criterion(proposal: ImprovementProposal) -> bool:
-    return any(
-        c.required and c.verification_method in _AUTOMATABLE
-        for c in proposal.acceptance_criteria
-    )
+def _is_auto_verifiable(proposal: ImprovementProposal) -> bool:
+    # auto-verifiable = the Deliverer has something to run: a non-empty delivery_run.
+    return bool(proposal.delivery_run)

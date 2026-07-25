@@ -16,10 +16,11 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def _extract_json(text: str) -> str:
-    # prefer a fenced ```json ... ``` block if present.
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    # prefer the LAST fenced ```json ... ``` block: a verbose model may emit
+    # intermediate blocks while investigating, and the final answer comes last.
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, re.S)
     if fenced:
-        return fenced.group(1).strip()
+        return fenced[-1].strip()
     # else take the outermost { ... } object.
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:

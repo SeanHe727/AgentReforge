@@ -53,7 +53,9 @@ class OpenAICompatibleClient:
             "model": self.model,
             "messages": self._format_messages(messages, system_prompt),
             "stream": True,
-            "max_tokens": self.max_tokens,
+            # newer models (gpt-5.x) reject `max_tokens`; `max_completion_tokens`
+            # is the current name and is accepted by gpt-4o too, so use it for all.
+            "max_completion_tokens": self.max_tokens,
             "temperature": self.temperature,
             "stream_options": {"include_usage": True},
         }
