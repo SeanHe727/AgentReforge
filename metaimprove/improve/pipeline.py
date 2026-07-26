@@ -33,6 +33,7 @@ from ..observability import traceable
 from ..tools.builtins import get_builtin_tools
 from ..tools.registry import ToolRegistry
 from . import policy_gate
+from .acceptance import validate_acceptance
 from .deliverer import Deliverer, Delivery
 from .models import (
     ExecutionBlocker,
@@ -48,7 +49,7 @@ from .run_config import (
     RecursionPolicy,
     profile_for,
 )
-from .worktree import WorktreeSession, _run_git
+from .worktree import GitError, WorktreeSession, _run_git
 from .writer_reviewer import ExecutionOutcome, WriterReviewer
 
 
@@ -209,7 +210,7 @@ class ImprovementPipeline:
         try:
             proposal = await orch.analyze(intent, trajectory, loop_history)
             # PIPELINE is the authority on DAG validity (the tool is advisory).
-            proposal = await self._enforce_valid_dag(orch, proposal)
+            proposal = await self._enforce_valid_proposal(orch, proposal)
         except ValueError as exc:
             return PipelineResult(stage="failed", loop=loop_i, error=str(exc))
 
@@ -246,18 +247,65 @@ class ImprovementPipeline:
             await wt.reset_hard(loop_base)  # roll back the failed loop
             return incomplete
 
-        # 6. Deliverer (runs the system once + hard gate + checklist + project review
-        #    of the loop diff), with a bounded repair loop.
-        loop_diff = await wt.diff_since(loop_base)
-        delivery = await self.deliverer.deliver(proposal, cwd=wt_path, loop_diff=loop_diff)
+        # 6. Check the REAL diff against the pre-approved write scope.  The proposal
+        # gate above checks intent; this gate checks what the Writer actually did.
+        changed_paths = await wt.changed_since(loop_base)
+        actual_gate = policy_gate.evaluate_changes(proposal, changed_paths, self.policy)
+        if actual_gate.decision == "needs_human":
+            if self.governance == GovernanceMode.AUTONOMOUS:
+                await wt.reset_hard(loop_base)
+                return PipelineResult(
+                    stage="needs_human", proposal=proposal, gate=actual_gate,
+                    approval=approval, frozen=frozen, outcome=outcome, loop=loop_i,
+                    error="; ".join(actual_gate.reasons),
+                )
+            scope_approval = await self.approver(proposal, actual_gate)
+            if not scope_approval.approved:
+                await wt.reset_hard(loop_base)
+                return PipelineResult(
+                    stage="rejected", proposal=proposal, gate=actual_gate,
+                    approval=scope_approval, frozen=frozen, outcome=outcome, loop=loop_i,
+                )
+
+        # 7. Deliverer sees loop_base -> current candidate.  Its commands are
+        # verification-only: any repository mutation rejects the delivery.
+        delivery, loop_diff = await self._deliver_immutable(
+            proposal, wt, loop_base, wt_path
+        )
         repairs = 0
-        while not delivery.passed and repairs < self.recursion.max_repairs:
+        while (
+            not delivery.passed
+            and delivery.integrity_ok
+            and repairs < self.recursion.max_repairs
+        ):
             repairs += 1
             outcome = await writer.repair(worktree=wt, instruction=_repair_instruction(delivery))
             if outcome.blocker is not None or not outcome.completed:
                 break
-            loop_diff = await wt.diff_since(loop_base)
-            delivery = await self.deliverer.deliver(proposal, cwd=wt_path, loop_diff=loop_diff)
+            repaired_gate = policy_gate.evaluate_changes(
+                proposal, await wt.changed_since(loop_base), self.policy
+            )
+            if repaired_gate.decision == "needs_human":
+                if self.governance == GovernanceMode.AUTONOMOUS:
+                    delivery = Delivery(
+                        passed=False,
+                        hard_gate_ok=False,
+                        reasons=repaired_gate.reasons,
+                    )
+                    loop_diff = await wt.diff_since(loop_base)
+                    break
+                repair_approval = await self.approver(proposal, repaired_gate)
+                if not repair_approval.approved:
+                    delivery = Delivery(
+                        passed=False,
+                        hard_gate_ok=False,
+                        reasons=["repair scope was not approved", *repaired_gate.reasons],
+                    )
+                    loop_diff = await wt.diff_since(loop_base)
+                    break
+            delivery, loop_diff = await self._deliver_immutable(
+                proposal, wt, loop_base, wt_path
+            )
 
         if not delivery.passed:
             # record the rejected diff, then roll back so it can't pollute the next loop.
@@ -270,8 +318,19 @@ class ImprovementPipeline:
             await wt.reset_hard(loop_base)
             return result
 
-        # 7. Delivered: one commit for the whole loop.
-        loop_commit = await wt.commit(f"improve loop {loop_i}: {proposal.summary}")
+        # 8. Delivered: one commit for the whole loop.
+        try:
+            loop_commit = await wt.commit(
+                f"improve loop {loop_i}: {proposal.summary}",
+                expected_tree=delivery.verified_tree,
+            )
+        except GitError as exc:
+            await wt.reset_hard(loop_base)
+            return PipelineResult(
+                stage="failed", proposal=proposal, gate=gate, approval=approval,
+                frozen=frozen, outcome=outcome, delivery=delivery, diff=loop_diff,
+                loop=loop_i, repairs=repairs, error=str(exc),
+            )
         version = ImprovementVersion(
             loop=loop_i, base_commit=loop_base, branch=wt.branch,
             verified_commit=loop_commit, proposal_hash=frozen.proposal_hash, evaluation_hash="",
@@ -329,21 +388,55 @@ class ImprovementPipeline:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return str(path)
 
-    async def _enforce_valid_dag(
+    async def _enforce_valid_proposal(
         self, orch: Orchestrator, proposal: ImprovementProposal, max_tries: int = 2
     ) -> ImprovementProposal:
-        """Reject an invalid task DAG deterministically; give the model bounded
-        chances to fix it, else raise (the cycle then fails)."""
-        tasks = [t.model_dump() for t in proposal.tasks]
-        validation = validate_plan(tasks)
+        """Hard-validate both the task graph and the executable acceptance contract."""
         tries = 0
-        while not validation.valid and tries < max_tries:
+        while tries <= max_tries:
+            dag = validate_plan([t.model_dump() for t in proposal.tasks])
+            acceptance = validate_acceptance(proposal)
+            problems = []
+            if not dag.valid:
+                problems.append(f"invalid task DAG — {dag.summary()}")
+            if not acceptance.valid:
+                problems.append(f"invalid acceptance contract — {acceptance.summary()}")
+            if not problems:
+                return proposal
+            if tries >= max_tries:
+                raise ValueError(
+                    f"proposal invalid after {tries} revision(s): {'; '.join(problems)}"
+                )
             tries += 1
-            proposal = await orch.revise(proposal, f"invalid task DAG — {validation.summary()}")
-            validation = validate_plan([t.model_dump() for t in proposal.tasks])
-        if not validation.valid:
-            raise ValueError(f"task DAG invalid after {tries} revision(s): {validation.summary()}")
-        return proposal
+            proposal = await orch.revise(proposal, "; ".join(problems))
+        raise AssertionError("unreachable")
+
+    async def _deliver_immutable(
+        self,
+        proposal: ImprovementProposal,
+        wt: WorktreeSession,
+        loop_base: str,
+        wt_path: str,
+    ) -> tuple[Delivery, str]:
+        """Deliver one exact candidate tree and reject verification side effects."""
+        candidate_tree = await wt.snapshot()
+        reviewed_diff = await wt.diff_since(loop_base)
+        delivery = await self.deliverer.deliver(
+            proposal, cwd=wt_path, loop_diff=reviewed_diff
+        )
+        delivered_tree = await wt.snapshot()
+        final_diff = await wt.diff_since(loop_base)
+        if delivered_tree != candidate_tree:
+            delivery.passed = False
+            delivery.integrity_ok = False
+            delivery.mutation_diff = await wt.diff_since(candidate_tree)
+            delivery.reasons.insert(
+                0,
+                "delivery mutated the candidate worktree; verification commands must be read-only",
+            )
+        else:
+            delivery.verified_tree = candidate_tree
+        return delivery, final_diff
 
     def _incomplete_result(
         self,

@@ -115,15 +115,26 @@ class WorktreeSession:
         if not self.keep:
             await self.remove()
 
-    async def commit(self, message: str) -> str | None:
+    async def commit(self, message: str, *, expected_tree: str | None = None) -> str | None:
         """Stage everything and commit. Returns the new commit sha, or None if
-        there was nothing to commit (avoids empty commits)."""
-        await _git("add", "-A", cwd=self.path)
+        there was nothing to commit.  When `expected_tree` is given, refuse to
+        commit a tree other than the exact candidate that passed delivery."""
+        actual_tree = await self.snapshot()
+        if expected_tree is not None and actual_tree != expected_tree:
+            raise GitError(
+                f"candidate tree changed after delivery: {actual_tree} != {expected_tree}"
+            )
         status = await _git("status", "--porcelain", cwd=self.path)
         if not status.strip():
             return None
         await _git("commit", "-m", message, cwd=self.path)
-        return await _git("rev-parse", "HEAD", cwd=self.path)
+        commit = await _git("rev-parse", "HEAD", cwd=self.path)
+        committed_tree = await _git("rev-parse", f"{commit}^{{tree}}", cwd=self.path)
+        if expected_tree is not None and committed_tree != expected_tree:
+            raise GitError(
+                f"committed tree differs from delivered tree: {committed_tree} != {expected_tree}"
+            )
+        return commit
 
     async def diff(self) -> str:
         """Full diff of the worktree against its base commit — every change the
@@ -161,6 +172,11 @@ class WorktreeSession:
     async def reset_hard(self, ref: str) -> None:
         """Discard all changes back to `ref` (roll back a failed loop). Best-effort."""
         await _run_git("reset", "--hard", ref, cwd=self.path)
+        await _run_git("clean", "-fd", cwd=self.path)
+
+    async def restore_snapshot(self, tree: str) -> None:
+        """Restore an exact uncommitted tree snapshot, including staged new files."""
+        await _git("read-tree", "--reset", "-u", tree, cwd=self.path)
         await _run_git("clean", "-fd", cwd=self.path)
 
     async def changed_since(self, ref: str) -> list[str]:

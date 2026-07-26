@@ -1,11 +1,8 @@
-"""The Deliverer — run the candidate once, then judge it against a checklist.
+"""The Deliverer — execute the frozen acceptance contract, then review the candidate.
 
-Like a human reviewer: it runs the system ONE time (the proposal's `delivery_run`
-commands), collects all the output, then goes through the Orchestrator's
-`delivery_checklist` point by point against that single result — it does NOT
-re-run a command per checklist item. A cheap deterministic hard gate (every run
-command must exit 0) sits under the LLM judgement; a change is delivered only if
-the hard gate passes AND the checklist review passes.
+Required command criteria are deterministic hard gates.  The LLM then reviews
+their evidence and the whole-loop diff for integration concerns; it is never the
+only acceptance signal.
 """
 
 from __future__ import annotations
@@ -73,8 +70,11 @@ class Delivery:
     passed: bool
     runs: list[RunResult] = field(default_factory=list)
     hard_gate_ok: bool = True
+    integrity_ok: bool = True
     checklist_review: str = ""
     reasons: list[str] = field(default_factory=list)
+    mutation_diff: str = ""
+    verified_tree: str = ""
 
 
 class Deliverer:
@@ -95,25 +95,43 @@ class Deliverer:
     async def deliver(
         self, proposal: ImprovementProposal, *, cwd: str, loop_diff: str = ""
     ) -> Delivery:
-        """Run the candidate once, hard-gate on exit codes, then LLM-judge the
-        checklist AND the whole loop diff (project-level review)."""
+        """Run each unique acceptance command once, then review the full candidate."""
+        commands = list(proposal.delivery_run)
+        commands.extend(
+            criterion.command
+            for criterion in proposal.acceptance_criteria
+            if criterion.verification == "command" and criterion.command.strip()
+        )
+        commands = list(dict.fromkeys(commands))
         # nothing to run -> can't deliver.
-        if not proposal.delivery_run:
-            return Delivery(passed=False, hard_gate_ok=False, reasons=["no delivery run defined"])
+        if not commands:
+            return Delivery(
+                passed=False,
+                hard_gate_ok=False,
+                reasons=["no executable acceptance command defined"],
+            )
 
-        # 1. ONE run: execute each command (denying dangerous ones), collect output.
-        runs = [await self._safe_run(cmd, cwd) for cmd in proposal.delivery_run]
+        # Execute each unique command once (denying dangerous ones), collect output.
+        runs = [await self._safe_run(cmd, cwd) for cmd in commands]
 
-        # 2. deterministic hard gate: every command must exit 0.
-        hard_ok = all(r.exit_code == 0 for r in runs)
+        # Deterministic hard gate: command exit codes and declared output assertions.
+        failures = _acceptance_failures(proposal, runs)
+        hard_ok = not failures
 
-        # 3. LLM judges the checklist (vs output) AND the loop diff (project review).
-        review, review_ok = await self._review(proposal.delivery_checklist, runs, loop_diff)
+        # The LLM judges integration semantics and the whole-loop diff.
+        checklist = list(proposal.delivery_checklist)
+        checklist.extend(
+            criterion.description
+            for criterion in proposal.acceptance_criteria
+            if criterion.required
+        )
+        checklist = list(dict.fromkeys(checklist))
+        review, review_ok = await self._review(checklist, runs, loop_diff)
 
         passed = hard_ok and review_ok
-        reasons = []
+        reasons = list(failures)
         if not hard_ok:
-            reasons.append("hard gate failed: a run command exited non-zero")
+            reasons.insert(0, "hard gate failed")
         if not review_ok:
             reasons.append("delivery review rejected (checklist or project concern)")
         return Delivery(
@@ -185,3 +203,33 @@ class Deliverer:
         # accept only on an explicit ACCEPT verdict.
         accept = "VERDICT: ACCEPT" in text.upper() and "VERDICT: REJECT" not in text.upper()
         return text, accept
+
+
+def _acceptance_failures(
+    proposal: ImprovementProposal, runs: list[RunResult]
+) -> list[str]:
+    """Evaluate the executable acceptance criteria without LLM judgement."""
+    by_command = {run.command: run for run in runs}
+    failures = [
+        f"delivery command {run.command!r}: exit {run.exit_code}, expected 0"
+        for run in runs
+        if run.command in proposal.delivery_run and run.exit_code != 0
+    ]
+    for criterion in proposal.acceptance_criteria:
+        if not criterion.required or criterion.verification != "command":
+            continue
+        run = by_command.get(criterion.command)
+        if run is None:
+            failures.append(f"{criterion.id}: command was not run")
+            continue
+        if run.exit_code != criterion.expected_exit_code:
+            failures.append(
+                f"{criterion.id}: exit {run.exit_code}, expected {criterion.expected_exit_code}"
+            )
+        for expected in criterion.required_output_contains:
+            if expected not in run.output:
+                failures.append(f"{criterion.id}: output missing {expected!r}")
+        for forbidden in criterion.forbidden_output_contains:
+            if forbidden in run.output:
+                failures.append(f"{criterion.id}: output contains forbidden {forbidden!r}")
+    return failures

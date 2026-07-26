@@ -47,17 +47,28 @@ Rules:
   {id, dependencies}). If it reports problems (duplicate ids, unknown dependencies,
   cycles, no runnable root), FIX the task graph and validate again. Only output the
   final proposal once validate_plan passes.
+- Define the approved write boundary in `allowed_write_paths`: repo-relative files,
+  directory prefixes ending in "/", or glob patterns. Keep it as narrow as possible.
+- Define a traceable acceptance contract. Every task references one or more criterion
+  ids; every required criterion is assigned to a task. Required criteria should use
+  `verification: "command"` with a safe, concrete command. The pipeline validates this
+  contract and runs the policy gate BEFORE any Writer starts.
 
 When done, output ONLY the proposal as ONE JSON object in a ```json code block. Field types:
 - evidence[]: {source_type: trajectory|test|benchmark|code|log, reference: str, observation: str}
-- tasks[]: {id: str, description: str, dependencies: [str]} — each `description` states
-  clearly WHAT THAT TASK SHOULD DO (its goal); the Reviewer checks each task against
-  it from fixed perspectives (inputs/outputs, dataflow/schema, goal, code quality).
+- tasks[]: {id: str, description: str, dependencies: [str],
+  acceptance_criteria_ids: [str]} — each `description` states clearly WHAT THAT TASK
+  SHOULD DO; the Reviewer checks the task-scoped diff against it and its criteria.
+- acceptance_criteria[]: {id: str, description: str,
+  mode: red_green|invariant|metric_improvement|non_regression|manual,
+  verification: command|review|manual, command: str, expected_exit_code: int,
+  required_output_contains: [str], forbidden_output_contains: [str],
+  test_level: full|focused|basic, required: bool}
+- allowed_write_paths[]: the exact approved write scope.
 - benefit/risk/effort: int 1-5; confidence: float 0-1
 - decision: proceed|abstain|needs_human
-- delivery_run[]: str — concrete shell commands that exercise the CHANGED system in
-  ONE run (e.g. "python3 -m mini_agent 'add 2 3' 'add x y'"). The Deliverer runs
-  these once and judges the output; use commands that actually run in the target.
+- delivery_run[]: optional additional integration commands. Criterion commands are
+  the standard hard acceptance checks; do not duplicate them here.
 - delivery_checklist[]: str — the whole loop's integration acceptance: what the
   Deliverer must confirm from that run's output (e.g. "add 2 3 prints 5", "bad input
   is handled without a crash").

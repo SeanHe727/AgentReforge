@@ -18,6 +18,7 @@ from ..orchestration.task_executor import ExecutorConfig, TaskExecutor
 from ..plan.models import ExecutionPlan, Task
 from ..prompt.assembler import PromptAssembler
 from .models import (
+    AcceptanceCriterion,
     ExecutionBlocker,
     ImprovementProposal,
     ImprovementTask,
@@ -38,14 +39,12 @@ CRITICAL editing rules:
 - NEVER abbreviate or elide code. Do not write placeholders like "... (existing
   content)", "# rest unchanged", or "# ...". Leave untouched code exactly as it is.
 
-Work in SMALL INCREMENTS and get each reviewed as you go:
-- After you finish a small, coherent part (e.g. one file or one function), call
-  `request_review` with a short summary of what you just did. It returns APPROVED or
-  concrete changes to make.
-- Address any requested changes, then continue. Do NOT write the entire task before any
-  review.
-- You must obtain an APPROVED from `request_review` covering your FINAL state before you
-  finish (reply with no tool call).
+Own the task through a coherent candidate:
+- Inspect the relevant code before editing.
+- Make focused changes, then run the task's executable acceptance commands.
+- Self-inspect the final task diff and report the commands you ran and their results.
+- The Orchestrator invokes an independent read-only Reviewer after you finish. Address
+  its concrete findings in the next bounded round; do not negotiate scope with it.
 
 If a Reviewer rejected a previous attempt, address the feedback directly. When done,
 briefly state what you changed and why."""
@@ -120,6 +119,7 @@ class WriterReviewer:
 
         # map the ImprovementTask DAG onto a plan; keep the richer specs by id.
         specs: dict[str, ImprovementTask] = {t.id: t for t in proposal.tasks}
+        criteria = {criterion.id: criterion for criterion in proposal.acceptance_criteria}
         plan = ExecutionPlan(
             goal=proposal.summary,
             tasks={
@@ -128,8 +128,8 @@ class WriterReviewer:
             },
         )
 
-        # improve config: serial, reviewed, structurally guarded, stop on a block; the
-        # Writer pushes each increment to the Reviewer itself via request_review.
+        # The Orchestrator owns hand-offs: Writer produces one coherent task candidate,
+        # then the independent Reviewer evaluates the task-scoped diff.
         config = ExecutorConfig(
             max_rounds=self.max_rounds,
             review=True,
@@ -138,11 +138,11 @@ class WriterReviewer:
             parallel=False,
             max_task_turns=self.max_task_turns,
             stop_on_block=True,
-            writer_driven_review=True,
+            writer_driven_review=False,
         )
 
         def build_message(task: Task, pl: ExecutionPlan, fb: ReviewResult | None) -> str:
-            return _writer_message(specs[task.id], pl, fb)
+            return _writer_message(specs[task.id], pl, fb, criteria)
 
         # the Reviewer is agentic and reviews each task from fixed perspectives.
         executor = self._executor(cwd)
@@ -152,7 +152,7 @@ class WriterReviewer:
             config=config,
             system_prompt=system_prompt,
             build_task_message=build_message,
-            task_brief=lambda task: _task_brief(specs[task.id]),
+            task_brief=lambda task: _task_brief(specs[task.id], criteria),
             memory=memory,
             code_index=code_index,
         )
@@ -188,7 +188,7 @@ class WriterReviewer:
             parallel=False,
             max_task_turns=self.max_task_turns,
             stop_on_block=False,
-            writer_driven_review=True,
+            writer_driven_review=False,
         )
         executor = self._executor(cwd)
         result = await executor.run(
@@ -235,20 +235,26 @@ def _repair_message(instruction: str, feedback: ReviewResult | None) -> str:
     return "\n".join(lines)
 
 
-def _task_brief(spec: ImprovementTask) -> str:
+def _task_brief(
+    spec: ImprovementTask,
+    criteria: dict[str, AcceptanceCriterion],
+) -> str:
     """What THIS task should do — the Reviewer's goal-realization anchor."""
-    return spec.description
+    checks = _criteria_text(spec, criteria)
+    return f"{spec.description}\n\nAcceptance contract:\n{checks}"
 
 
 def _writer_message(
     spec: ImprovementTask,
     plan: ExecutionPlan,
     feedback: ReviewResult | None,
+    criteria: dict[str, AcceptanceCriterion],
 ) -> str:
     """Build the Writer's prompt: task + done prerequisites + prior feedback."""
     lines = [
         WRITER_PROMPT_SUFFIX.strip(),
         f"\nTask [{spec.id}]: {spec.description}",
+        f"\nAcceptance contract:\n{_criteria_text(spec, criteria)}",
     ]
     # include the descriptions of already-completed prerequisites for context.
     done_deps = [
@@ -269,3 +275,20 @@ def _writer_message(
             "to fix ONLY these findings. Do NOT rewrite the files from scratch:\n" + fb
         )
     return "\n".join(lines)
+
+
+def _criteria_text(
+    spec: ImprovementTask,
+    criteria: dict[str, AcceptanceCriterion],
+) -> str:
+    lines: list[str] = []
+    for criterion_id in spec.acceptance_criteria_ids:
+        criterion = criteria.get(criterion_id)
+        if criterion is None:
+            continue
+        command = f"; run: {criterion.command}" if criterion.command else ""
+        lines.append(
+            f"- [{criterion.id}] {criterion.description} "
+            f"(verification={criterion.verification}{command})"
+        )
+    return "\n".join(lines) or "- (none)"

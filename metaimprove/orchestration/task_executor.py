@@ -27,12 +27,13 @@ class WorktreeLike(Protocol):
     # the slice of WorktreeSession the executor needs (keeps it decoupled).
     path: Path
 
-    async def commit(self, message: str) -> str | None: ...
+    async def commit(self, message: str, *, expected_tree: str | None = None) -> str | None: ...
     async def diff(self) -> str: ...
     async def changed_paths(self) -> list[str]: ...
     async def changed_since(self, ref: str) -> list[str]: ...
     async def snapshot(self) -> str: ...
     async def diff_since(self, ref: str) -> str: ...
+    async def restore_snapshot(self, tree: str) -> None: ...
     async def read_base(self, rel_path: str) -> str | None: ...
 
 # text meaning the model abbreviated instead of writing real code — a clobber sign.
@@ -239,7 +240,22 @@ class TaskExecutor:
         if config.worktree is not None and task_start is not None:
             diff = await config.worktree.diff_since(task_start)
             review_input += f"\n\n--- diff (this task) ---\n{diff}"
+        review_tree = (
+            await config.worktree.snapshot()
+            if config.worktree is not None
+            else None
+        )
         review = await self.reviewer.review(task=brief, result=review_input)
+        if config.worktree is not None and review_tree is not None:
+            after_review = await config.worktree.snapshot()
+            if after_review != review_tree:
+                mutation = await config.worktree.diff_since(review_tree)
+                await config.worktree.restore_snapshot(review_tree)
+                return _revise(
+                    location,
+                    "Reviewer mutated the candidate while verifying it; the mutation was "
+                    f"discarded. Use read-only checks.\n{mutation[:2000]}",
+                )
         return self._to_review(review, location=location)
 
     def _request_review_tool(

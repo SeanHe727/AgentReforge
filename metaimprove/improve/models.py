@@ -54,10 +54,17 @@ class ImprovementTask(BaseModel):
 
 
 class AcceptanceCriterion(BaseModel):
-    # a success condition + how thorough its generated test should be.
+    # A traceable, executable definition of done.  `command` checks are the hard
+    # acceptance signal; `review` and `manual` checks may add judgement but cannot
+    # make an autonomous proposal auto-verifiable on their own.
     id: str
     description: str
     mode: Literal["red_green", "invariant", "metric_improvement", "non_regression", "manual"]
+    verification: Literal["command", "review", "manual"] = "command"
+    command: str = ""
+    expected_exit_code: int = 0
+    required_output_contains: list[str] = Field(default_factory=list)
+    forbidden_output_contains: list[str] = Field(default_factory=list)
     # rigor of the functional test the Test Agent generates:
     #   full    -> core/framework: happy path + edges + error handling + invariants
     #   focused -> important logic: unit test asserting key values + intermediates
@@ -104,6 +111,9 @@ class ImprovementProposal(BaseModel):
     goals: list[str] = Field(default_factory=list)
     non_goals: list[str] = Field(default_factory=list)
     affected_components: list[str] = Field(default_factory=list)
+    # Explicit repo-relative file paths, directory prefixes ending in "/", or
+    # glob patterns the Writer is authorized to modify.
+    allowed_write_paths: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     tasks: list[ImprovementTask] = Field(default_factory=list)
     # decision inputs (1-5 scores from the LLM; confidence in [0,1]).
