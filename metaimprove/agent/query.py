@@ -12,12 +12,21 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..llm.base import LlmClient
+from ..observability import traceable
 from ..tools.base import ToolContext
 from ..tools.executor import ToolExecutor
 from ..tools.registry import ToolRegistry
 from ..types import Message
 
+# never log these to the tracer — `client` holds the API key; the rest are noise.
+_TRACE_DROP = {"client", "registry", "approval_callback", "memory", "code_index", "history"}
 
+
+def _redact_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in inputs.items() if k not in _TRACE_DROP}
+
+
+@traceable(name="agent.query", run_type="chain", process_inputs=_redact_inputs)
 async def query(
     *,
     client: LlmClient,

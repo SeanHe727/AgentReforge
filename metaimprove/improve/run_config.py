@@ -43,9 +43,9 @@ class RunProfile:
 
 
 _PROFILES: dict[DetailLevel, RunProfile] = {
-    DetailLevel.QUICK: RunProfile(max_rounds=1, max_task_turns=6, test_ceiling="basic"),
-    DetailLevel.STANDARD: RunProfile(max_rounds=2, max_task_turns=8, test_ceiling="focused"),
-    DetailLevel.DEEP: RunProfile(max_rounds=3, max_task_turns=12, test_ceiling="full"),
+    DetailLevel.QUICK: RunProfile(max_rounds=2, max_task_turns=6, test_ceiling="basic"),
+    DetailLevel.STANDARD: RunProfile(max_rounds=4, max_task_turns=8, test_ceiling="focused"),
+    DetailLevel.DEEP: RunProfile(max_rounds=6, max_task_turns=12, test_ceiling="full"),
 }
 
 # rigor order used to clamp a criterion's test_level down to the profile ceiling.

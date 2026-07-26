@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ..llm.base import LlmClient
+from ..observability import traceable
 from ..tools.builtins import get_builtin_tools
 from ..tools.registry import ToolRegistry
 from . import policy_gate
@@ -136,6 +137,7 @@ class ImprovementPipeline:
         self.auto_merge = auto_merge
         self.keep_worktree = keep_worktree
 
+    @traceable(name="improve.run", run_type="chain")
     async def run(
         self, *, intent: str, trajectory: list[dict[str, Any]] | None = None
     ) -> PipelineResult:
@@ -187,6 +189,7 @@ class ImprovementPipeline:
             "trajectory_records": traj,
         }
 
+    @traceable(name="improve.loop", run_type="chain")
     async def _run_loop(
         self,
         wt: WorktreeSession,

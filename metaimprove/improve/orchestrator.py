@@ -20,6 +20,7 @@ from ..agent.query import query
 from ..llm.base import LlmClient
 from ..llm.collect import collect_text
 from ..llm.parse import parse_json_model
+from ..observability import traceable
 from ..tools.registry import ToolRegistry
 from ..types import Message
 from .models import ImprovementProposal
@@ -73,6 +74,7 @@ class Orchestrator:
         # plus a deterministic DAG check it must run before finalizing its plan.
         self.registry.register(validate_plan_tool)
 
+    @traceable(name="orchestrator.analyze", run_type="chain")
     async def analyze(
         self,
         intent: str,

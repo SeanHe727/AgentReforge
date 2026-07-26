@@ -19,6 +19,8 @@ from typing import Any, Protocol
 from ..agent.query import query
 from ..improve.models import ExecutionBlocker, Finding, ReviewResult
 from ..plan.models import ExecutionPlan, Task
+from ..tools.base import Tool, ToolResult, object_schema
+from ..tools.registry import ToolRegistry
 
 
 class WorktreeLike(Protocol):
@@ -61,6 +63,8 @@ class ExecutorConfig:
     parallel: bool = True  # run independent tasks concurrently (forced off with a worktree)
     max_task_turns: int = 8
     stop_on_block: bool = False  # stop the whole run + emit a blocker on non-convergence
+    # give the worker a request_review tool so the Writer pushes each increment itself.
+    writer_driven_review: bool = False
 
 
 @dataclass
@@ -166,13 +170,22 @@ class TaskExecutor:
         # task-scoped snapshot: the Reviewer + guard see only THIS task's increment,
         # not prior tasks/loops. No per-round commits — the loop commits once, later.
         task_start = await config.worktree.snapshot() if config.worktree is not None else None
+        brief = task_brief(task)
+
+        # writer-driven review: give the worker a request_review tool so IT pushes each
+        # increment to the Reviewer as it goes, instead of only being reviewed at round end.
+        worker_registry: Any = self.registry
+        if config.writer_driven_review and config.worktree is not None:
+            worker_registry = self._registry_with(
+                self._request_review_tool(config, task_start, brief)
+            )
 
         for round_i in range(1, config.max_rounds + 1):
             # run the worker (with the prior Reviewer's feedback on retries).
             feedback = last_review if round_i > 1 else None
             worker_text, err = await self._run_worker(
                 build_task_message(task, plan, feedback), cwd, system_prompt,
-                config.max_task_turns, memory, code_index,
+                config.max_task_turns, memory, code_index, registry=worker_registry,
             )
             attempts.append(worker_text or err or "(no output)")
 
@@ -186,22 +199,11 @@ class TaskExecutor:
             if not config.review:
                 return TaskResult(task.id, "completed", round_i, worker_text, None, None, attempts)
 
-            # deterministic structural guard (scoped to this task's changed files).
-            if config.structural_guard and config.worktree is not None:
-                findings = await self._structural_findings(config.worktree, since=task_start)
-                if findings:
-                    last_review = ReviewResult(verdict="revise", findings=findings,
-                                               summary="Structural guard rejected the edit.")
-                    await _emit(event_sink, _reject_event(task.id, round_i, "structural guard"))
-                    continue
-
-            # Reviewer reviews the worker's result + THIS task's diff (since snapshot).
-            review_result = worker_text
-            if config.worktree is not None:
-                task_diff = await config.worktree.diff_since(task_start)
-                review_result += f"\n\n--- diff (this task) ---\n{task_diff}"
-            review = await self.reviewer.review(task=task_brief(task), result=review_result)
-            verdict = self._to_review(review, location=task.id)
+            # end-of-round gate: the SAME structural-guard + Reviewer check the worker can
+            # invoke inline via request_review, now enforced on the round's final state.
+            verdict = await self._run_review(
+                config, task_start, brief, worker_text, location=task.id
+            )
             last_review = verdict
             if verdict.verdict == "accept":
                 await _emit(event_sink,
@@ -215,6 +217,65 @@ class TaskExecutor:
         return TaskResult(task.id, "blocked", config.max_rounds,
                           attempts[-1] if attempts else "", last_review, None, attempts)
 
+    async def _run_review(
+        self,
+        config: ExecutorConfig,
+        task_start: str | None,
+        brief: str,
+        body_text: str,
+        *,
+        location: str = "review",
+    ) -> ReviewResult:
+        """Structural guard + Reviewer on THIS task's increment (shared by the round
+        gate and the Writer's inline request_review tool)."""
+        # deterministic structural guard first (a clobber/syntax/shrink is a hard reject).
+        if config.structural_guard and config.worktree is not None:
+            findings = await self._structural_findings(config.worktree, since=task_start)
+            if findings:
+                return ReviewResult(verdict="revise", findings=findings,
+                                    summary="Structural guard rejected the edit.")
+        # the Reviewer sees the body (worker output or the Writer's note) + the diff.
+        review_input = body_text
+        if config.worktree is not None and task_start is not None:
+            diff = await config.worktree.diff_since(task_start)
+            review_input += f"\n\n--- diff (this task) ---\n{diff}"
+        review = await self.reviewer.review(task=brief, result=review_input)
+        return self._to_review(review, location=location)
+
+    def _request_review_tool(
+        self, config: ExecutorConfig, task_start: str | None, brief: str
+    ) -> Tool:
+        """A tool the Writer calls to push its latest increment to the Reviewer."""
+        async def handler(args: dict[str, Any], _context: Any) -> ToolResult:
+            note = str(args.get("summary") or "(no summary)")
+            verdict = await self._run_review(config, task_start, brief, note,
+                                             location="request_review")
+            return ToolResult(content=_render_verdict(verdict), is_error=False)
+
+        return Tool(
+            name="request_review",
+            description=(
+                "Ask the Reviewer to review the increment you JUST implemented. Call this "
+                "after finishing a small, coherent part (e.g. one file or function). It "
+                "returns APPROVED or concrete changes to make. You must obtain an APPROVED "
+                "covering your final state before you finish."
+            ),
+            parameters=object_schema(
+                {"summary": {"type": "string",
+                             "description": "Briefly, what you just implemented for review."}},
+                ["summary"],
+            ),
+            handler=handler,
+            is_read_only=True,
+        )
+
+    def _registry_with(self, extra: Tool) -> ToolRegistry:
+        """A per-task copy of the registry with one extra tool added."""
+        reg = ToolRegistry()
+        reg.register_all([t for n in self.registry.list_names() if (t := self.registry.get(n))])
+        reg.register(extra)
+        return reg
+
     async def _run_worker(
         self,
         message: str,
@@ -223,12 +284,13 @@ class TaskExecutor:
         max_task_turns: int,
         memory: Any,
         code_index: Any,
+        registry: Any = None,
     ) -> tuple[str, str | None]:
         """One worker turn: drive the ReAct loop, returning (text, error-or-None)."""
         text = ""
         async for event in query(
             client=self.client,
-            registry=self.registry,
+            registry=registry or self.registry,
             system_prompt=system_prompt,
             user_message=message,
             cwd=cwd,
@@ -313,6 +375,17 @@ class TaskExecutor:
             affected_tasks=affected,
             recommendation="request_human",
         )
+
+
+def _render_verdict(verdict: ReviewResult) -> str:
+    """Turn a review verdict into the text the Writer reads from request_review."""
+    if verdict.verdict == "accept":
+        return "APPROVED — the increment looks good. Continue with the next part, or finish."
+    if verdict.findings:
+        lines = ["CHANGES REQUESTED — fix these before finishing:"]
+        lines += [f"- [{f.severity}] {f.location}: {f.description}" for f in verdict.findings]
+        return "\n".join(lines)
+    return f"CHANGES REQUESTED: {verdict.summary}"
 
 
 def _revise(location: str, feedback: str) -> ReviewResult:

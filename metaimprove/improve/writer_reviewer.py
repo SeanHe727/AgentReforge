@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..observability import traceable
 from ..orchestration.task_executor import ExecutorConfig, TaskExecutor
 from ..plan.models import ExecutionPlan, Task
 from ..prompt.assembler import PromptAssembler
@@ -36,6 +37,15 @@ CRITICAL editing rules:
 - Use `write_file` ONLY to create a brand-new file.
 - NEVER abbreviate or elide code. Do not write placeholders like "... (existing
   content)", "# rest unchanged", or "# ...". Leave untouched code exactly as it is.
+
+Work in SMALL INCREMENTS and get each reviewed as you go:
+- After you finish a small, coherent part (e.g. one file or one function), call
+  `request_review` with a short summary of what you just did. It returns APPROVED or
+  concrete changes to make.
+- Address any requested changes, then continue. Do NOT write the entire task before any
+  review.
+- You must obtain an APPROVED from `request_review` covering your FINAL state before you
+  finish (reply with no tool call).
 
 If a Reviewer rejected a previous attempt, address the feedback directly. When done,
 briefly state what you changed and why."""
@@ -89,6 +99,7 @@ class WriterReviewer:
         )
         return TaskExecutor(client=self.client, registry=self.registry, reviewer=reviewer)
 
+    @traceable(name="writer_reviewer.run", run_type="chain")
     async def run(
         self,
         *,
@@ -117,7 +128,8 @@ class WriterReviewer:
             },
         )
 
-        # improve config: serial, reviewed, structurally guarded, stop on a block.
+        # improve config: serial, reviewed, structurally guarded, stop on a block; the
+        # Writer pushes each increment to the Reviewer itself via request_review.
         config = ExecutorConfig(
             max_rounds=self.max_rounds,
             review=True,
@@ -126,6 +138,7 @@ class WriterReviewer:
             parallel=False,
             max_task_turns=self.max_task_turns,
             stop_on_block=True,
+            writer_driven_review=True,
         )
 
         def build_message(task: Task, pl: ExecutionPlan, fb: ReviewResult | None) -> str:
@@ -175,6 +188,7 @@ class WriterReviewer:
             parallel=False,
             max_task_turns=self.max_task_turns,
             stop_on_block=False,
+            writer_driven_review=True,
         )
         executor = self._executor(cwd)
         result = await executor.run(
@@ -245,8 +259,13 @@ def _writer_message(
     if done_deps:
         prereqs = "\n".join(f"- {d}" for d in done_deps)
         lines.append(f"\nAlready implemented prerequisites:\n{prereqs}")
-    # on a retry, surface the Reviewer's findings.
+    # on a retry, surface the Reviewer's findings and require an incremental fix:
+    # the previous attempt is already on disk, so build on it, don't restart.
     if feedback and feedback.findings:
         fb = "\n".join(f"- {f.description}" for f in feedback.findings)
-        lines.append(f"\nThe Reviewer REJECTED your previous attempt. Fix these:\n{fb}")
+        lines.append(
+            "\nThe Reviewer REJECTED your previous attempt. Your previous work is ALREADY "
+            "on disk — read the relevant files first, then make TARGETED edits (edit_file) "
+            "to fix ONLY these findings. Do NOT rewrite the files from scratch:\n" + fb
+        )
     return "\n".join(lines)

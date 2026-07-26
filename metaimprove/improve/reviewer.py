@@ -15,6 +15,7 @@ from typing import Any
 
 from ..agent.query import query
 from ..agent.reviewer import Review
+from ..observability import traceable
 from ..tools.registry import ToolRegistry
 
 REVIEWER_PROMPT = """You are an agentic code Reviewer, like a careful senior engineer.
@@ -34,6 +35,13 @@ a well-done task passes them all:
 How to check: read the changed files; confirm they import / compile; run targeted
 or smoke commands with the bash tool (e.g. `python3 -c "..."`) to see it really
 works. You may run throwaway smoke commands but MUST NOT modify product code.
+
+Judge by IMPACT, not perfection. REJECT only for a REAL defect: a requirement in
+"what this task should do" is not met, or there is a genuine bug (crash, deadlock,
+wrong result, security issue, or brittle logic that breaks in NORMAL use). If the core
+requirements are correctly met and only minor, non-blocking nits remain (contrived
+edge cases, naming, style, nice-to-haves), APPROVE — you may mention the nits, but do
+NOT block on them. Do not invent new requirements beyond the task.
 
 When done, reply on the FIRST line with exactly APPROVED or REJECTED. If REJECTED,
 add a second line with concrete, actionable feedback for the Writer to fix."""
@@ -64,6 +72,7 @@ class AgenticReviewer:
         self.cwd = cwd
         self.max_turns = max_turns
 
+    @traceable(name="reviewer.review", run_type="chain")
     async def review(self, task: str, result: str) -> Review:
         """Drive a ReAct review of the task's diff; return an approved/feedback verdict."""
         # the brief is what THIS task should do + the Writer's change to review.

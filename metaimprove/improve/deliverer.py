@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.collect import collect_text
+from ..observability import traceable
 from ..types import Message
 from .models import ImprovementProposal
 
@@ -90,6 +91,7 @@ class Deliverer:
         self.approve_command = approve_command
         self.timeout_s = timeout_s
 
+    @traceable(name="deliverer.deliver", run_type="chain")
     async def deliver(
         self, proposal: ImprovementProposal, *, cwd: str, loop_diff: str = ""
     ) -> Delivery:
