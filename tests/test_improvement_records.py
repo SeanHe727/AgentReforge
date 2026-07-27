@@ -3,16 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 
-from metaimprove.improve.context import OrchestratorContextBuilder, summarize_target_trajectory
-from metaimprove.improve.history_index import ImprovementHistoryIndex
-from metaimprove.improve.records import (
+from agentreforge.improve.context import OrchestratorContextBuilder, summarize_target_trajectory
+from agentreforge.improve.history_index import ImprovementHistoryIndex
+from agentreforge.improve.records import (
     ComponentRecord,
     ImprovementRecordStore,
     RecursiveRunRecord,
     ReforgeLoopRecord,
 )
-from metaimprove.improve.trajectory import load_trajectory, log_target_trajectory
-from metaimprove.types import Message
+from agentreforge.improve.trajectory import load_trajectory, log_target_trajectory
+from agentreforge.types import Message
 
 
 def test_target_trajectory_records_prompt_arguments_and_final_response(tmp_path):
@@ -163,7 +163,7 @@ def test_record_store_writes_run_loop_and_diff(tmp_path):
 
 
 def test_history_index_retrieves_old_reforge_experience_not_current_facts(tmp_path):
-    index = ImprovementHistoryIndex(tmp_path / ".meta-improve" / "history.db")
+    index = ImprovementHistoryIndex(tmp_path / ".agentreforge" / "history.db")
     old = ReforgeLoopRecord(
         run_id="old-run",
         loop_id="old-run/loop_0",

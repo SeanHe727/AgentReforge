@@ -3,7 +3,7 @@
 ## 1. Purpose
 
 This document defines a reliability-first pipeline for improving Python agent
-systems. The initial target is PaiCLI itself, but the architecture must support
+systems. The initial target is AgentReforge itself, but the architecture must support
 other runnable Python agent projects through an explicit target contract.
 
 The system is not designed to maximize autonomous self-modification. Its goal is
@@ -488,8 +488,8 @@ specific generated tests. Supports the strongest automated acceptance policy.
 
 The same engine supports two target relationships:
 
-- **Self mode**: a stable PaiCLI instance improves a candidate PaiCLI worktree.
-- **External mode**: PaiCLI improves another compatible Python agent project.
+- **Self mode**: a stable AgentReforge instance improves a candidate AgentReforge worktree.
+- **External mode**: AgentReforge improves another compatible Python agent project.
 
 The host improvement engine and target worktree remain separate in both modes.
 
@@ -523,7 +523,7 @@ pipeline with abstention and policy gates.
 6. Git worktree lifecycle and audit journal.
 7. Bounded Writer-Critic implementation loop.
 8. Evaluation Runner, Verifier, and deterministic Policy Gate.
-9. End-to-end assisted improvement demo on PaiCLI.
+9. End-to-end assisted improvement demo on AgentReforge.
 10. External Python agent adapter and reproducible example project.
 11. Benchmark suite, ablations, documentation, and stronger optional sandboxing.
 
@@ -541,4 +541,3 @@ The implementation must preserve these invariants:
 - No automatic merge, push, or deployment in the initial release.
 - Every final decision must be explainable from proposal, policy, code diff, and
   evaluation evidence.
-

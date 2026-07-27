@@ -1,4 +1,4 @@
-"""Shared data types for meta-improve.
+"""Shared data types for agent-reforge.
 
 Kept deliberately small for now. We add fields (multimodal content, etc.)
 in later phases when the features that need them arrive.

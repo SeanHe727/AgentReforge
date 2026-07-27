@@ -131,7 +131,7 @@ class ImprovementRecordStore:
     """Filesystem-backed source of truth for AgentReforge run/loop records."""
 
     def __init__(self, repo_root: str | Path, run_id: str):
-        self.root = Path(repo_root) / ".meta-improve" / "records" / run_id
+        self.root = Path(repo_root) / ".agentreforge" / "records" / run_id
         self.run_path = self.root / "run.json"
         self.loops_dir = self.root / "loops"
 

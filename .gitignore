@@ -12,6 +12,6 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
-.meta-improve/
+.agentreforge/
 demo-agent/
 eval/solutions/

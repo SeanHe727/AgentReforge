@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from conftest import make_proposal
 
-from metaimprove.improve.models import (
+from agentreforge.improve.models import (
     DiagnosticFinding,
     ImprovementBatchBudget,
     InterventionCandidate,
     OrchestratorAnalysis,
 )
-from metaimprove.improve.pipeline import _analysis_problems
+from agentreforge.improve.pipeline import _analysis_problems
 
 
 def _analysis(*, selected: list[str], efforts: tuple[int, int] = (2, 2)):

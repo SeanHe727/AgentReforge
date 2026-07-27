@@ -1,5 +1,5 @@
 [project]
-name = "meta-improve"
+name = "agent-reforge"
 version = "0.1.0"
 description = "A reliability-first, spec-driven, human-in-the-loop self-improving coding agent"
 readme = "README.md"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-meta-improve = "metaimprove.entrypoints.cli:app"
+agent-reforge = "agentreforge.entrypoints.cli:app"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.2.0", "ruff>=0.5.0"]
@@ -30,7 +30,7 @@ build-backend = "hatchling.build"
 package = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["metaimprove"]
+packages = ["agentreforge"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

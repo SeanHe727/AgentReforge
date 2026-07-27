@@ -23,10 +23,10 @@ class PromptAssembler:
         self.memories = memories or []
 
     def _project_memory(self) -> str:
-        # read project instruction files (PAI.md) so the agent gets project-specific
+        # read project instruction files so the agent gets project-specific
         # context. Always injected (unlike skills, which are lazy-loaded on demand).
         chunks = []
-        for name in ("PAI.md", ".meta-improve/PAI.md"):
+        for name in ("AGENTREFORGE.md", ".agentreforge/AGENTREFORGE.md"):
             path = Path(self.cwd) / name
             if path.exists():
                 try:
@@ -39,7 +39,7 @@ class PromptAssembler:
         # basic informations for agent, joined into one system prompt string.
         parts = [
             # 1. identity & purpose
-            "You are meta-improve, a powerful AI coding assistant running in a terminal.",
+            "You are agent-reforge, a powerful AI coding assistant running in a terminal.",
             # 2. environment awareness
             f"Current time: {datetime.now().isoformat(timespec='seconds')}",
             f"Working directory: {self.cwd}",
@@ -58,10 +58,10 @@ class PromptAssembler:
             parts.append("")
             parts.append("Known facts from long-term memory:")
             parts.extend(f"- {fact}" for fact in self.memories)
-        # 6. project instructions (PAI.md): always-injected project context.
+        # 6. project instructions: always-injected project context.
         project_memory = self._project_memory()
         if project_memory:
             parts.append("")
-            parts.append("Project instructions (PAI.md):")
+            parts.append("Project instructions (AGENTREFORGE.md):")
             parts.append(project_memory)
         return "\n".join(parts)

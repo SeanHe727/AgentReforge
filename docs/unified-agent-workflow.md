@@ -1,18 +1,18 @@
-# Unified MetaImprove Agent Workflow
+# Unified AgentReforge Agent Workflow
 
 ## 1. Purpose
 
-This document proposes a unified workflow architecture for MetaImprove.
+This document proposes a unified workflow architecture for AgentReforge.
 
 The central idea is:
 
-> MetaImprove should have one deterministic orchestrator, use the general coding
+> AgentReforge should have one deterministic orchestrator, use the general coding
 > agent as its implementation worker, support autonomous and supervised governance,
 > and improve code through bounded, evidence-driven recursive cycles.
 
 The general coding agent should not need to understand the complete self-improvement
 process. It receives a concrete coding task and works inside an isolated Git
-worktree. The MetaImprove orchestrator owns analysis, policy, approval, versioning,
+worktree. The AgentReforge orchestrator owns analysis, policy, approval, versioning,
 verification, and the decision to continue or stop.
 
 ## 2. Design Goals
@@ -52,7 +52,7 @@ The corresponding control flow is:
 
 ```mermaid
 flowchart TD
-    U["User intent"] --> O["MetaImprove Orchestrator"]
+    U["User intent"] --> O["AgentReforge Orchestrator"]
     O --> A["Analyze"]
     A --> P["Proposal and acceptance contract"]
     P --> PV["Validate proposal and task DAG"]
@@ -131,7 +131,7 @@ Orient -> Diagnose symptom/root cause/capability gap
 A possible top-level interface is:
 
 ```python
-class MetaImproveOrchestrator:
+class AgentReforgeOrchestrator:
     analyzer: Analyzer
     code_agent: CodeAgent
     evaluator: EvaluationSystem
@@ -151,12 +151,12 @@ rather than independent top-level workflow loops.
 ## 5. General Coding Agent as the Worker
 
 The existing ReAct coding agent should be the implementation engine used by
-MetaImprove.
+AgentReforge.
 
-MetaImprove adds analysis and governance before it, and verification after it:
+AgentReforge adds analysis and governance before it, and verification after it:
 
 ```text
-MetaImprove = Analyze + Govern + General Code Agent + Verify + Recurse
+AgentReforge = Analyze + Govern + General Code Agent + Verify + Recurse
 ```
 
 The coding agent receives a normalized task such as:
@@ -181,7 +181,7 @@ read -> reason -> call tools -> edit -> run checks -> report evidence
 ```
 
 The coding agent does not decide whether its own version should be accepted or
-whether MetaImprove should recurse again.
+whether AgentReforge should recurse again.
 
 ### 5.1 Shared Writer/Reviewer task contract
 
@@ -473,7 +473,7 @@ that test after seeing the implementation.
 
 ## 10. Git-Based Versioning and Isolation
 
-MetaImprove uses Git as the version system. A separate content-addressed snapshot
+AgentReforge uses Git as the version system. A separate content-addressed snapshot
 system is not required for the core workflow.
 
 Git provides:
@@ -659,7 +659,7 @@ async def run(request: ImproveRequest, ctx: RunContext) -> ImproveRun:
 One possible package structure is:
 
 ```text
-metaimprove/
+agentreforge/
   orchestration/
     orchestrator.py
     state_machine.py
@@ -756,7 +756,7 @@ After behavior is covered by tests and migrated to the unified orchestrator:
 
 The intended boundary is:
 
-> The general coding agent changes code. The MetaImprove orchestrator decides why a
+> The general coding agent changes code. The AgentReforge orchestrator decides why a
 > change is justified, whether it is allowed, how it must be verified, whether the
 > candidate version is accepted, and whether another bounded improvement cycle is
 > warranted.

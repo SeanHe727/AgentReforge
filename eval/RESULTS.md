@@ -30,7 +30,7 @@ Baseline solutions: `eval/solutions/baseline/<problem_id>/`.
 
 ## What AgentReforge did
 
-`meta-improve improve --cwd demo-agent -m gpt-5.4-mini --mode autonomous --level deep`.
+`agent-reforge improve --cwd demo-agent -m gpt-5.4-mini --mode autonomous --level deep`.
 
 Across several runs the pipeline's Reviewer repeatedly CAUGHT real, subtle bugs in the
 Writer's attempts — a `verified` flag flipped by any read/bash call; brittle keyword

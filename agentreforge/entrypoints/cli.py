@@ -24,12 +24,12 @@ from ..tools.builtins import get_builtin_tools
 from ..tools.registry import ToolRegistry
 
 # Long-term memory and the code index live in SQLite files under the user's home.
-_MEMORY_DB = Path.home() / ".meta-improve" / "memory.db"
-_CODE_INDEX_DB = Path.home() / ".meta-improve" / "code_index.db"
+_MEMORY_DB = Path.home() / ".agentreforge" / "memory.db"
+_CODE_INDEX_DB = Path.home() / ".agentreforge" / "code_index.db"
 
 app = typer.Typer(
-    name="meta-improve",
-    help="meta-improve - Terminal AI Agent in Python",
+    name="agent-reforge",
+    help="agent-reforge - Terminal AI Agent in Python",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -101,7 +101,7 @@ async def run_prompt(
     registry = ToolRegistry()
     registry.register_all(get_builtin_tools())
 
-    # discover + register external MCP tools from .meta-improve/mcp.json (if any).
+    # discover + register external MCP tools from .agentreforge/mcp.json (if any).
     mcp_manager = McpClientManager(cwd)
     registry.register_all(await mcp_manager.load_tools())
     for name, err in mcp_manager.last_errors.items():
@@ -341,12 +341,12 @@ def serve(
         typer.echo("Fatal error: model API key is not configured.", err=True)
         raise typer.Exit(1)
     # the Runtime API's own key (clients must present this), separate from the model key.
-    api_key = os.getenv("METAIMPROVE_RUNTIME_API_KEY", "dev-key")
+    api_key = os.getenv("AGENTREFORGE_RUNTIME_API_KEY", "dev-key")
 
     state = RuntimeState(config, root, api_key)
     fastapi_app = create_app(state)  # create application
 
-    typer.echo(f"meta-improve Runtime API on http://{host}:{port} (x-api-key: {api_key})")
+    typer.echo(f"agent-reforge Runtime API on http://{host}:{port} (x-api-key: {api_key})")
     uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
 

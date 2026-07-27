@@ -34,8 +34,8 @@ inspect-before-edit and verify-before-finish guidance.
 
 The raw local evidence is stored under:
 
-- `.meta-improve/benchmarks/v01-combined-calibration/`
-- `.meta-improve/benchmarks/v01-combined-repeat2/`
-- `.meta-improve/benchmarks/v01-calibration/` (tools-only negative calibration)
+- `.agentreforge/benchmarks/v01-combined-calibration/`
+- `.agentreforge/benchmarks/v01-combined-repeat2/`
+- `.agentreforge/benchmarks/v01-calibration/` (tools-only negative calibration)
 
 These generated solution directories are intentionally not committed.

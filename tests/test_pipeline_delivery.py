@@ -4,9 +4,9 @@ import asyncio
 
 from conftest import make_proposal
 
-from metaimprove.improve.delivery_coordinator import Delivery
-from metaimprove.improve.models import ReviewResult
-from metaimprove.improve.pipeline import (
+from agentreforge.improve.delivery_coordinator import Delivery
+from agentreforge.improve.models import ReviewResult
+from agentreforge.improve.pipeline import (
     ImprovementPipeline,
     ImprovementVersion,
     PipelineResult,
@@ -15,8 +15,8 @@ from metaimprove.improve.pipeline import (
     _combine_execution_outcomes,
     _repair_instruction,
 )
-from metaimprove.improve.writer_reviewer import ExecutionOutcome, TaskOutcome
-from metaimprove.tools.registry import ToolRegistry
+from agentreforge.improve.writer_reviewer import ExecutionOutcome, TaskOutcome
+from agentreforge.tools.registry import ToolRegistry
 
 
 class FakeClient:

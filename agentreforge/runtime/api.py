@@ -15,7 +15,7 @@ class TurnRequest(BaseModel):
 
 
 def create_app(state: RuntimeState) -> FastAPI:
-    app = FastAPI(title="meta-improve Runtime API")
+    app = FastAPI(title="agent-reforge Runtime API")
 
     async def verify(x_api_key: str = Header(default="")) -> None:
         if x_api_key != state.api_key:

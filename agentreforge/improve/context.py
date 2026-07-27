@@ -18,7 +18,7 @@ from .records import ReforgeLoopRecord, ReforgeLoopSummary, TargetRunSummary
 
 _SKIP_DIRS = {
     ".git",
-    ".meta-improve",
+    ".agentreforge",
     ".venv",
     "__pycache__",
     "build",

@@ -1,4 +1,4 @@
-"""Configuration layer for meta-improve.
+"""Configuration layer for agent-reforge.
 
 Responsible for merging config from several sources into one clean object that
 the rest of the program reads. This is the classic "config layering" pattern:
@@ -6,8 +6,8 @@ lower-priority layers are applied first, higher-priority layers override them.
 
 Priority (low -> high), per the project spec:
     1. built-in defaults
-    2. ~/.meta-improve/config.json          (not yet: file layers come in a later phase)
-    3. project .meta-improve/config.json    (not yet)
+    2. ~/.agentreforge/config.json          (not yet: file layers come in a later phase)
+    3. project .agentreforge/config.json    (not yet)
     4. project .env                   (not yet)
     5. CLI arguments
     6. process environment variables  (highest)
@@ -41,7 +41,7 @@ PROVIDER_KEY_ENV: dict[str, str] = {
 
 
 @dataclass
-class PaiCliConfig:
+class AgentReforgeConfig:
     """The single, merged configuration object the rest of the app reads."""
 
     provider: str = DEFAULT_PROVIDER
@@ -56,7 +56,7 @@ def load_config(
     cli_model: str | None = None,
     cli_base_url: str | None = None,
     cli_api_key: str | None = None,
-) -> PaiCliConfig:
+) -> AgentReforgeConfig:
     """Resolve the final config by applying layers low -> high.
 
     For each field we start from the lowest-priority source and let each higher
@@ -69,32 +69,32 @@ def load_config(
     provider = DEFAULT_PROVIDER
     if cli_provider:
         provider = cli_provider
-    if os.getenv("METAIMPROVE_PROVIDER"):
-        provider = os.environ["METAIMPROVE_PROVIDER"]
+    if os.getenv("AGENTREFORGE_PROVIDER"):
+        provider = os.environ["AGENTREFORGE_PROVIDER"]
 
     # model: default < CLI < env
     model = DEFAULT_MODEL
     if cli_model:
         model = cli_model
-    if os.getenv("METAIMPROVE_MODEL"):
-        model = os.environ["METAIMPROVE_MODEL"]
+    if os.getenv("AGENTREFORGE_MODEL"):
+        model = os.environ["AGENTREFORGE_MODEL"]
 
     # base_url: provider default < CLI < env
     base_url = PROVIDER_BASE_URLS.get(provider)
     if cli_base_url:
         base_url = cli_base_url
-    if os.getenv("METAIMPROVE_BASE_URL"):
-        base_url = os.environ["METAIMPROVE_BASE_URL"]
+    if os.getenv("AGENTREFORGE_BASE_URL"):
+        base_url = os.environ["AGENTREFORGE_BASE_URL"]
 
     # api_key: CLI < provider-specific env (e.g. OPENAI_API_KEY) < generic env
     api_key = cli_api_key
     key_env = PROVIDER_KEY_ENV.get(provider)
     if key_env and os.getenv(key_env):
         api_key = os.environ[key_env]
-    if os.getenv("METAIMPROVE_API_KEY"):
-        api_key = os.environ["METAIMPROVE_API_KEY"]
+    if os.getenv("AGENTREFORGE_API_KEY"):
+        api_key = os.environ["AGENTREFORGE_API_KEY"]
 
-    return PaiCliConfig(
+    return AgentReforgeConfig(
         provider=provider,
         model=model,
         api_key=api_key,

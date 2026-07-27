@@ -19,7 +19,7 @@ _SKIP = {
     ".venv",
     "node_modules",
     "__pycache__",
-    ".meta-improve",
+    ".agentreforge",
     "dist",
     "build",
     ".pytest_cache",
@@ -29,7 +29,7 @@ _SKIP = {
 class SnapshotService:
     def __init__(self, cwd: str | Path, store_root: str | Path | None = None):
         self.cwd = Path(cwd).resolve()
-        root = Path(store_root or Path.home() / ".meta-improve" / "snapshots")
+        root = Path(store_root or Path.home() / ".agentreforge" / "snapshots")
         self.store = root / _project_key(self.cwd)
         self.blobs = self.store / "blobs"
         self.snaps = self.store / "snaps"

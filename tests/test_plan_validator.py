@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from metaimprove.improve.plan_validator import validate_plan
+from agentreforge.improve.plan_validator import validate_plan
 
 
 def test_plan_validator_accepts_a_dag():

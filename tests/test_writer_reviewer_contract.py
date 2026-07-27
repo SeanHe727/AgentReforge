@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from conftest import make_proposal
 
-from metaimprove.improve.reviewer import _parse, _validate_writer_report
-from metaimprove.improve.writer_reviewer import (
+from agentreforge.improve.reviewer import _parse, _validate_writer_report
+from agentreforge.improve.writer_reviewer import (
     _parse_writer_report,
     _task_brief,
     _task_contract_text,
@@ -27,7 +27,7 @@ def test_writer_and_reviewer_share_one_traceable_task_contract():
 
 
 def test_writer_prompt_forbids_inventing_paths_outside_task_scope():
-    from metaimprove.improve.writer_reviewer import WRITER_PROMPT_SUFFIX
+    from agentreforge.improve.writer_reviewer import WRITER_PROMPT_SUFFIX
 
     assert "Modify only the exact files listed under Affected components" in (
         WRITER_PROMPT_SUFFIX

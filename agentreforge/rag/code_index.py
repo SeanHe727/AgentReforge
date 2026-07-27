@@ -23,7 +23,7 @@ TEXT_SUFFIXES = {
     ".sql",
     ".sh",
 }
-SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", "__pycache__", ".meta-improve"}
+SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", "__pycache__", ".agentreforge"}
 
 
 @dataclass

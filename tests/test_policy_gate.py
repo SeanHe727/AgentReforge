@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from conftest import make_proposal
 
-from metaimprove.improve.policy_gate import evaluate, evaluate_changes
+from agentreforge.improve.policy_gate import evaluate, evaluate_changes
 
 
 def test_prewrite_gate_proceeds_for_grounded_executable_contract():
@@ -23,8 +23,8 @@ def test_prewrite_gate_escalates_non_executable_required_criterion():
 
 def test_prewrite_gate_conservatively_detects_protected_glob():
     proposal = make_proposal(
-        allowed_write_paths=["metaimprove/**/*.py"],
-        affected_components=["metaimprove"],
+        allowed_write_paths=["agentreforge/**/*.py"],
+        affected_components=["agentreforge"],
     )
 
     decision = evaluate(proposal)

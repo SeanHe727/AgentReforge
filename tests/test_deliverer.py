@@ -4,15 +4,15 @@ import asyncio
 
 from conftest import make_proposal
 
-from metaimprove.improve.acceptance_runner import (
+from agentreforge.improve.acceptance_runner import (
     AcceptanceRun,
     RunResult,
     acceptance_failures,
     dangerous_command,
 )
-from metaimprove.improve.deliverer import GoalReview, goal_review_message
-from metaimprove.improve.delivery_coordinator import DeliveryCoordinator
-from metaimprove.improve.models import (
+from agentreforge.improve.deliverer import GoalReview, goal_review_message
+from agentreforge.improve.delivery_coordinator import DeliveryCoordinator
+from agentreforge.improve.models import (
     DiagnosticFinding,
     InterventionCandidate,
     OrchestratorAnalysis,

@@ -1,7 +1,7 @@
 """Audit log: append-only JSONL record of dangerous tool operations.
 
 Every mutating/blocked/denied operation is written as one JSON line to
-~/.meta-improve/audit.jsonl. JSONL (one JSON object per line) is the industry-standard
+~/.agentreforge/audit.jsonl. JSONL (one JSON object per line) is the industry-standard
 format for append-only logs: cheap to append, easy to grep/stream/parse.
 """
 
@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-_DEFAULT_PATH = Path.home() / ".meta-improve" / "audit.jsonl"
+_DEFAULT_PATH = Path.home() / ".agentreforge" / "audit.jsonl"
 
 
 class AuditLog:

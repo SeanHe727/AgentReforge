@@ -26,8 +26,8 @@ class GatePolicy:
     # critical parts of the improvement ENGINE itself: touching them needs a human.
     protected_paths: list[str] = field(
         default_factory=lambda: [
-            "metaimprove/improve/",
-            "metaimprove/orchestration/",
+            "agentreforge/improve/",
+            "agentreforge/orchestration/",
             "pyproject.toml",
             ".github/",
         ]

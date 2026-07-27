@@ -11,8 +11,8 @@ from ..rag.code_index import CodeIndex
 from ..tools.builtins import get_builtin_tools
 from ..tools.registry import ToolRegistry
 
-_MEMORY_DB = Path.home() / ".meta-improve" / "memory.db"
-_CODE_INDEX_DB = Path.home() / ".meta-improve" / "code_index.db"
+_MEMORY_DB = Path.home() / ".agentreforge" / "memory.db"
+_CODE_INDEX_DB = Path.home() / ".agentreforge" / "code_index.db"
 
 
 @dataclass

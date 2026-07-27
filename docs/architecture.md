@@ -4,10 +4,10 @@
 
 1. `README.md` — product scope and quick start.
 2. `docs/unified-agent-workflow.md` — terminology, lifecycle, and invariants.
-3. `metaimprove/improve/pipeline.py` — authoritative state transitions.
-4. `metaimprove/improve/models.py` — shared proposal and Task contracts.
-5. `metaimprove/improve/orchestrator.py` — diagnosis and Batch planning.
-6. `metaimprove/improve/writer_reviewer.py` and `reviewer.py` — Task execution.
+3. `agentreforge/improve/pipeline.py` — authoritative state transitions.
+4. `agentreforge/improve/models.py` — shared proposal and Task contracts.
+5. `agentreforge/improve/orchestrator.py` — diagnosis and Batch planning.
+6. `agentreforge/improve/writer_reviewer.py` and `reviewer.py` — Task execution.
 7. `delivery_coordinator.py`, `acceptance_runner.py`, and `deliverer.py` —
    Batch-level delivery.
 
@@ -16,7 +16,7 @@ unified workflow and current code when the two differ.
 
 ## Package ownership
 
-### `metaimprove/improve/`
+### `agentreforge/improve/`
 
 The AgentReforge product workflow:
 
@@ -39,22 +39,22 @@ The AgentReforge product workflow:
 
 ### General agent infrastructure
 
-- `metaimprove/agent/` — ReAct query loop and older plan/reviewer adapters.
-- `metaimprove/orchestration/` — shared dependency-aware Task executor.
-- `metaimprove/tools/` — tool registry, built-ins, and execution.
-- `metaimprove/llm/` — provider-neutral LLM interfaces and structured parsing.
-- `metaimprove/policy/` — command/path guards and audit logging.
-- `metaimprove/rag/` and `memory/` — local code retrieval and SQLite memory.
-- `metaimprove/mcp/` — external MCP tool discovery.
-- `metaimprove/runtime/` — FastAPI thread/turn/event API.
+- `agentreforge/agent/` — ReAct query loop and older plan/reviewer adapters.
+- `agentreforge/orchestration/` — shared dependency-aware Task executor.
+- `agentreforge/tools/` — tool registry, built-ins, and execution.
+- `agentreforge/llm/` — provider-neutral LLM interfaces and structured parsing.
+- `agentreforge/policy/` — command/path guards and audit logging.
+- `agentreforge/rag/` and `memory/` — local code retrieval and SQLite memory.
+- `agentreforge/mcp/` — external MCP tool discovery.
+- `agentreforge/runtime/` — FastAPI thread/turn/event API.
 
 ## Runtime artifacts
 
 AgentReforge writes target-specific runtime data under the target repository's
-`.meta-improve/` directory:
+`.agentreforge/` directory:
 
 ```text
-.meta-improve/
+.agentreforge/
   records/<run_id>/
     run.json
     loops/loop_<n>/

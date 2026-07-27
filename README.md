@@ -8,9 +8,6 @@ It is not an unrestricted “LLM edits itself forever” loop. Each improvement 
 planned, implemented, reviewed, tested, isolated in Git, and either committed or
 rolled back.
 
-> The installable Python package and CLI still use the historical name
-> `metaimprove` / `meta-improve`. AgentReforge is the public project name.
-
 ## What is implemented
 
 - A general ReAct coding agent with local tools, SQLite memory/code index, MCP,
@@ -53,10 +50,10 @@ uv sync --extra dev
 export OPENAI_API_KEY=...
 
 # Run the ordinary coding agent.
-uv run meta-improve -p "inspect this repository and summarize the architecture"
+uv run agent-reforge -p "inspect this repository and summarize the architecture"
 
 # Improve another Git repository.
-uv run meta-improve improve \
+uv run agent-reforge improve \
   --cwd /path/to/target-agent \
   --intent "Improve repository inspection and verification behavior" \
   --model gpt-5.4-mini \
@@ -91,14 +88,14 @@ of universal coding-capability improvement.
 ## Repository map
 
 ```text
-metaimprove/agent/          ordinary ReAct/plan execution components
-metaimprove/improve/        AgentReforge recursive improvement workflow
-metaimprove/orchestration/  shared Task executor
-metaimprove/tools/          local tool contracts and execution
-metaimprove/policy/         command/path safety
-metaimprove/rag/            local code index
-metaimprove/memory/         SQLite memory
-metaimprove/runtime/        FastAPI runtime
+agentreforge/agent/          ordinary ReAct/plan execution components
+agentreforge/improve/        AgentReforge recursive improvement workflow
+agentreforge/orchestration/  shared Task executor
+agentreforge/tools/          local tool contracts and execution
+agentreforge/policy/         command/path safety
+agentreforge/rag/            local code index
+agentreforge/memory/         SQLite memory
+agentreforge/runtime/        FastAPI runtime
 eval/mini/                  deterministic early-version smoke benchmark
 eval/                       larger experimental coding evaluation
 tests/                      Workflow and component regression tests
@@ -121,7 +118,7 @@ demo: proposals, Task reviews, acceptance evidence, diffs, and one commit per Lo
 
 ```bash
 uv run pytest
-uv run ruff check metaimprove eval tests --exclude eval/solutions
+uv run ruff check agentreforge eval tests --exclude eval/solutions
 ```
 
 ## License

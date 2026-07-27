@@ -79,7 +79,7 @@ class WorktreeSession:
         self.base = base
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.branch = branch or f"improve/{stamp}"
-        root = Path(worktrees_root or self.repo_root / ".meta-improve" / "worktrees")
+        root = Path(worktrees_root or self.repo_root / ".agentreforge" / "worktrees")
         self.path = (root / stamp).resolve()
         self.keep = keep
         self._base_commit: str | None = None

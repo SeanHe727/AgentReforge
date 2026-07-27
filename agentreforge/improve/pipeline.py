@@ -199,7 +199,7 @@ class ImprovementPipeline:
             record_store = ImprovementRecordStore(self.cwd, run_record.run_id)
             record_store.start(run_record)
             history_index = ImprovementHistoryIndex(
-                Path(self.cwd) / ".meta-improve" / "improvement_history.db"
+                Path(self.cwd) / ".agentreforge" / "improvement_history.db"
             )
             history_index.rebuild(self.cwd)
         except Exception:
@@ -310,7 +310,7 @@ class ImprovementPipeline:
         # 1. Orchestrator analyzes the current state, given what earlier loops tried.
         code_index = CodeIndex(
             root=wt_path,
-            db_path=Path(self.cwd) / ".meta-improve" / "orchestrator_code_index.db",
+            db_path=Path(self.cwd) / ".agentreforge" / "orchestrator_code_index.db",
         )
         code_index.rebuild()
         context = OrchestratorContextBuilder(wt_path).build(
@@ -524,7 +524,7 @@ class ImprovementPipeline:
     def _write_run_report(
         self, manifest: dict[str, Any], all_results: list[PipelineResult], final: PipelineResult
     ) -> str:
-        reports_dir = Path(self.cwd) / ".meta-improve" / "reports"
+        reports_dir = Path(self.cwd) / ".agentreforge" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         lines = [f"# Recursive Run {manifest['run_id']}", "", "## Manifest"]
         lines += [f"- **{k}:** {v}" for k, v in manifest.items()]
@@ -639,7 +639,7 @@ class ImprovementPipeline:
         return result
 
     def _write_report(self, result: PipelineResult) -> str:
-        reports_dir = Path(self.cwd) / ".meta-improve" / "reports"
+        reports_dir = Path(self.cwd) / ".agentreforge" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         path = reports_dir / f"{stamp}_{result.stage}.md"

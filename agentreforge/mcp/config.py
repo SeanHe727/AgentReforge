@@ -16,9 +16,9 @@ class McpServerSpec:
 
 
 def load_mcp_specs(project_root: str | Path) -> dict[str, McpServerSpec]:  # {name: McpServerSpec}
-    # Read .meta-improve/mcp.json if present. Standard shape:
+    # Read .agentreforge/mcp.json if present. Standard shape:
     # {"mcpServers": {"time": {"command": "uvx", "args": ["mcp-server-time"]}}}
-    config_path = Path(project_root) / ".meta-improve" / "mcp.json"
+    config_path = Path(project_root) / ".agentreforge" / "mcp.json"
     if not config_path.exists():
         return {}
     try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 
-from metaimprove.improve.worktree import WorktreeSession
+from agentreforge.improve.worktree import WorktreeSession
 
 
 def _git(repo, *args):

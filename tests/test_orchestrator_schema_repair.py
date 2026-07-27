@@ -5,8 +5,8 @@ import asyncio
 import pytest
 from conftest import make_proposal
 
-from metaimprove.improve.orchestrator import Orchestrator
-from metaimprove.tools.registry import ToolRegistry
+from agentreforge.improve.orchestrator import Orchestrator
+from agentreforge.tools.registry import ToolRegistry
 
 
 class _UnusedClient:

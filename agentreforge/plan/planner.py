@@ -8,7 +8,7 @@ from ..llm.parse import parse_json_model
 from ..plan.models import ExecutionPlan, Task, TaskStatus
 from ..types import Message
 
-PLANNER_PROMPT = """You are meta-improve's planner.
+PLANNER_PROMPT = """You are agent-reforge's planner.
 Decompose the user's goal into a small executable DAG of tasks.
 Return ONLY JSON of this shape (no prose, no markdown):
 {

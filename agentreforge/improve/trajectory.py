@@ -10,7 +10,7 @@ This module records the TARGET AGENT, not AgentReforge's own workflow.  The
 separate AgentReforge run/loop audit lives in ``improve.records``.
 
 Records the original target task, observable tool arguments/results, final
-response, errors, and usage. Stored under ~/.meta-improve/traces/<project_key>/,
+response, errors, and usage. Stored under ~/.agentreforge/traces/<project_key>/,
 isolated per project — reusing snapshot's project key so both agree on "which project".
 """
 
@@ -30,7 +30,7 @@ _SENSITIVE_KEYS = {"api_key", "authorization", "password", "secret", "token"}
 
 
 def _trace_dir(cwd: str | Path, store_root: str | Path | None = None) -> Path:
-    root = Path(store_root or Path.home() / ".meta-improve" / "traces")
+    root = Path(store_root or Path.home() / ".agentreforge" / "traces")
     return root / _project_key(Path(cwd).resolve())
 
 

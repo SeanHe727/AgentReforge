@@ -38,7 +38,7 @@ class ImprovementHistoryIndex:
         """Re-index durable loop records. The JSON files remain authoritative."""
 
         root = Path(repo_root).resolve()
-        records_root = root / ".meta-improve" / "records"
+        records_root = root / ".agentreforge" / "records"
         with self._connect() as conn:
             conn.execute(
                 "delete from improvement_history where target_repo = ?",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from metaimprove.improve.models import (
+from agentreforge.improve.models import (
     AcceptanceCriterion,
     ContractClause,
     Evidence,

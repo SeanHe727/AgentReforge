@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from conftest import make_proposal
 
-from metaimprove.improve.acceptance import validate_acceptance
+from agentreforge.improve.acceptance import validate_acceptance
 
 
 def test_acceptance_contract_is_traceable_and_executable():
@@ -98,7 +98,7 @@ def test_acceptance_contract_rejects_unavailable_python_interpreter(monkeypatch)
     proposal.acceptance_criteria[0].command = "PYTHONDONTWRITEBYTECODE=1 python -m tests"
     proposal.delivery_run = ["python -m package --help"]
     monkeypatch.setattr(
-        "metaimprove.improve.acceptance.shutil.which",
+        "agentreforge.improve.acceptance.shutil.which",
         lambda executable: None if executable == "python" else f"/bin/{executable}",
     )
 
