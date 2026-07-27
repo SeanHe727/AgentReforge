@@ -4,6 +4,7 @@ import asyncio
 
 from conftest import make_proposal
 
+from agentreforge.improve.acceptance_runner import RunResult
 from agentreforge.improve.delivery_coordinator import Delivery
 from agentreforge.improve.models import ReviewResult
 from agentreforge.improve.pipeline import (
@@ -55,6 +56,27 @@ def _pipeline(deliverer):
         registry=ToolRegistry(),
         deliverer=deliverer,
     )
+
+
+def test_repair_instruction_includes_exit_zero_output_mismatches():
+    delivery = Delivery(
+        passed=False,
+        acceptance_failures=["AC5: output missing 'verify'"],
+        runs=[
+            RunResult(
+                "python3 -c \"print('verification')\"",
+                0,
+                "verification",
+            )
+        ],
+    )
+
+    instruction = _repair_instruction(delivery)
+
+    assert "output missing 'verify'" in instruction
+    assert "(exit 0)" in instruction
+    assert "verification" in instruction
+    assert "do not game" in instruction
 
 
 def test_deliverer_receives_loop_base_diff_and_unchanged_tree_passes():

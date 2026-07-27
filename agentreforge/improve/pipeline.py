@@ -964,16 +964,18 @@ def _repair_instruction(delivery: Delivery) -> str:
     """Turn a rejected delivery into a concrete repair brief for the Writer."""
     lines = [
         "The candidate did not pass delivery. Fix the PRODUCT CODE so it does. "
-        "Here are the deterministic runner failures and high-level review findings:",
+        "Here are the deterministic runner failures and high-level review findings. "
+        "Repair the intended behavior exercised by the failing criterion; do not game "
+        "an output assertion by hardcoding its missing marker into unrelated output:",
     ]
     if delivery.acceptance_failures:
         lines.append("\nDeterministic AcceptanceRunner failures:")
         lines.extend(f"- {failure}" for failure in delivery.acceptance_failures)
-    # the failing run commands + their output.
+    # Include exit-0 runs too: an output assertion can fail even when the command
+    # itself succeeds.
     for r in delivery.runs:
-        if r.exit_code != 0:
-            tail = r.output[-800:] if r.output else ""
-            lines.append(f"\n$ {r.command} (exit {r.exit_code})\n{tail}")
+        tail = r.output[-800:] if r.output else "(no output)"
+        lines.append(f"\n$ {r.command} (exit {r.exit_code})\n{tail}")
     # the Deliverer's high-level proposal-vs-diff review (why it rejected).
     if not delivery.goal_accepted and delivery.goal_review:
         lines.append(f"\nDeliverer goal review:\n{delivery.goal_review}")
