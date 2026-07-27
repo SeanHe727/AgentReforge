@@ -5,12 +5,18 @@ import asyncio
 import pytest
 from conftest import make_proposal
 
-from agentreforge.improve.orchestrator import Orchestrator
+from agentreforge.improve.orchestrator import ORCHESTRATOR_PROMPT, Orchestrator
 from agentreforge.tools.registry import ToolRegistry
 
 
 class _UnusedClient:
     pass
+
+
+def test_orchestrator_distinguishes_candidate_and_task_dependencies():
+    assert "Task `dependencies`" in ORCHESTRATOR_PROMPT
+    assert "ONLY exact Task `id` values" in ORCHESTRATOR_PROMPT
+    assert "Never put a Candidate" in ORCHESTRATOR_PROMPT
 
 
 def test_proposal_schema_repair_can_recover_on_second_retry():

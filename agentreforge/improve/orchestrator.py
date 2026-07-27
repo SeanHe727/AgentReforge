@@ -87,6 +87,11 @@ PHASE 5 — PLAN
 - Only now create the Task DAG. Every Task MUST name its owning selected Candidate.
   Multiple Tasks may implement one large Candidate; separate small Candidates normally
   receive separate Tasks.
+- Keep the two dependency namespaces distinct:
+  Candidate `dependencies` contain exact Candidate names, while Task `dependencies`
+  contain ONLY exact Task `id` values declared in this proposal. Never put a Candidate
+  name, description, or capability label in a Task dependency. A runnable root Task has
+  an empty dependency list.
 - Then define the write boundary, per-Task acceptance contract, batch-level Delivery
   checks, rollback plan, and final decision.
 
@@ -103,8 +108,9 @@ Rules:
 - Prefer abstain when evidence is weak or expected value is low.
 - BEFORE emitting the proposal, call `validate_plan` with your `tasks` (a list of
   {id, dependencies}). If it reports problems (duplicate ids, unknown dependencies,
-  cycles, no runnable root), FIX the task graph and validate again. Only output the
-  final proposal once validate_plan passes.
+  cycles, no runnable root), FIX the task graph and validate again. For an unknown Task
+  dependency, replace it with an exact declared Task id or remove it when the relationship
+  belongs only at Candidate level. Only output the final proposal once validate_plan passes.
 - Define the approved write boundary in `allowed_write_paths`: repo-relative files,
   directory prefixes ending in "/", or glob patterns. Keep authorization narrow around
   the selected Improvement Batch; do not use this safety rule to bias solution selection
@@ -162,7 +168,7 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
   prohibited_shortcuts: [{id, description}],
   affected_components: [str], reviewer_focus: [str],
   required_safety_properties: [path_confinement],
-  dependencies: [str], acceptance_criteria_ids: [str]}.
+  dependencies: [task_id], acceptance_criteria_ids: [str]}.
   Use unique clause ids within each task (for example RB1, CON1, INV1, PS1).
   `description` is the concrete objective; `capability_change` states what reusable
   target-agent ability changes; required behaviors must be observable; constraints
@@ -244,7 +250,9 @@ class Orchestrator:
             "problem and keep everything else valid. For a missing safety-property "
             "mapping, update BOTH sides: tag an executable acceptance criterion with "
             "`verified_safety_properties`, and add that exact criterion id to the owning "
-            "Task's `acceptance_criteria_ids`."
+            "Task's `acceptance_criteria_ids`. For an unknown Task dependency, use ONLY "
+            "an exact `id` from the proposal's `tasks` list; never use a Candidate name "
+            "or description as a Task dependency."
         )
         text = await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
