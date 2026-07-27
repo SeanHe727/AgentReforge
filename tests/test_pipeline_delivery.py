@@ -10,6 +10,7 @@ from metaimprove.improve.pipeline import (
     ImprovementPipeline,
     ImprovementVersion,
     PipelineResult,
+    _as_converged,
     _as_partial,
     _combine_execution_outcomes,
     _repair_instruction,
@@ -119,6 +120,30 @@ def test_later_loop_failure_is_reported_as_partial_delivery():
     assert result.terminal_stage == "rejected_delivery"
     assert result.terminal_error == "bad command"
     assert result.terminal_report_path == "/tmp/terminal.md"
+
+
+def test_later_orchestrator_abstention_is_graceful_convergence():
+    success = PipelineResult(
+        stage="delivered",
+        loop=2,
+        delivery=Delivery(passed=True),
+        version=ImprovementVersion(
+            loop=2,
+            base_commit="base",
+            branch="improve/test",
+            verified_commit="verified",
+            proposal_hash="proposal",
+            evaluation_hash="",
+        ),
+    )
+    abstention = PipelineResult(stage="abstained", loop=3)
+
+    result = _as_converged(success, abstention)
+
+    assert result.stage == "converged"
+    assert result.version.verified_commit == "verified"
+    assert result.terminal_loop == 3
+    assert result.terminal_stage == "abstained"
 
 
 def test_delivery_repair_appends_to_original_task_history():

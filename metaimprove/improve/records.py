@@ -84,7 +84,7 @@ class ReforgeLoopSummary(BaseModel):
     stage: str
     proposal_summary: str = ""
     capability_gaps: list[str] = Field(default_factory=list)
-    selected_candidate: str = ""
+    selected_candidates: list[str] = Field(default_factory=list)
     changed_paths: list[str] = Field(default_factory=list)
     component_status: dict[str, str] = Field(default_factory=dict)
     commit: str = ""

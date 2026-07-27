@@ -43,6 +43,25 @@ def test_reviewer_cannot_approve_without_covering_every_contract_clause():
     assert complete.approved
 
 
+def test_reviewer_all_clause_pass_checklist_is_an_unambiguous_approval():
+    task = (
+        "Shared Task Contract [implement]\n"
+        "Required review clause ids: RB1, INV1\n"
+    )
+
+    complete_without_verdict = _parse(
+        "[RB1] PASS — runtime evidence\n[INV1] PASS — code evidence",
+        task,
+    )
+    checklist_with_failure = _parse(
+        "[RB1] PASS — runtime evidence\n[INV1] FAIL — regression",
+        task,
+    )
+
+    assert complete_without_verdict.approved
+    assert not checklist_with_failure.approved
+
+
 def test_writer_report_is_typed_and_must_cover_contract_clauses():
     task = (
         "Shared Task Contract [implement]\n"

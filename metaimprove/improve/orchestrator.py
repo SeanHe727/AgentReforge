@@ -3,8 +3,8 @@
 Reuses the ReAct loop (query) with a READ-ONLY tool subset so the model can
 investigate the actual source, grounded by the execution trajectory and the
 user's intent. It does NOT write code (that's the Writer). Its final message is
-the ImprovementProposal as JSON, validated via Pydantic — with one self-correcting
-repair retry if the first JSON doesn't satisfy the schema.
+the ImprovementProposal as JSON, validated via Pydantic — with bounded
+self-correcting repair retries if the JSON doesn't satisfy the schema.
 
 Kept separate from Planner on purpose: Planner decomposes a plain goal for the
 common /plan and /team execution modes; the Orchestrator is the richer,
@@ -67,14 +67,27 @@ PHASE 3 — GENERATE CANDIDATES
   module when the evidence supports a smaller fix.
 - Reject changes that only patch the observed example without a reusable mechanism.
 
-PHASE 4 — SELECT
+PHASE 4 — PACK THE IMPROVEMENT BATCH
 - Rank candidates by evidence strength, cross-task capability benefit, causal clarity,
   risk, effort, and testability.
-- Select the smallest COHERENT intervention with the highest expected capability
-  leverage. Explain the causal chain: change X -> behavior Y -> capability delta Z.
+- A Loop is one bounded Improvement Batch and may select 1-3 Candidates.
+- If the highest-value Candidate is large (effort > 2), normally select it alone and
+  split it into multiple independently reviewable Tasks.
+- If the highest-value Candidates are small (effort <= 2), pack up to three into the
+  same Loop even when they address different objectives, provided they do not conflict,
+  fit the total budget, and each has an independently verifiable Task contract.
+- Candidate coherence is NOT required. Compatibility, bounded scope, explicit ownership,
+  and independent acceptance are required.
+- Never pack Candidates merely because they rank highly: check file/interface conflicts,
+  dependencies, aggregate risk, aggregate effort, and whether one Candidate invalidates
+  another's acceptance evidence.
+- Explain the packing decision and causal chain for every selected Candidate.
 
 PHASE 5 — PLAN
-- Only now create the task DAG, write boundary, system acceptance contract, delivery
+- Only now create the Task DAG. Every Task MUST name its owning selected Candidate.
+  Multiple Tasks may implement one large Candidate; separate small Candidates normally
+  receive separate Tasks.
+- Then define the write boundary, per-Task acceptance contract, batch-level Delivery
   checks, rollback plan, and final decision.
 
 Rules:
@@ -94,7 +107,7 @@ Rules:
   final proposal once validate_plan passes.
 - Define the approved write boundary in `allowed_write_paths`: repo-relative files,
   directory prefixes ending in "/", or glob patterns. Keep authorization narrow around
-  the selected coherent solution; do not use this safety rule to bias solution selection
+  the selected Improvement Batch; do not use this safety rule to bias solution selection
   toward superficial local edits.
 - Define a traceable acceptance contract. Every task references one or more criterion
   ids; every required criterion is assigned to a task. Required criteria should use
@@ -108,25 +121,43 @@ Rules:
   Do not grade generated-code quality here. Capability evaluation is a separate post-run
   harness after AgentReforge has produced a candidate commit.
 - Verification commands must not leave runtime artifacts in the candidate. Prefer
-  `PYTHONDONTWRITEBYTECODE=1` for Python commands and never include `__pycache__`,
+  `PYTHONDONTWRITEBYTECODE=1 python3` for Python commands (do not assume a `python`
+  alias exists) and never include `__pycache__`,
   `*.pyc`, `.pytest_cache`, coverage output, or runtime state files in allowed_write_paths;
   the post-write policy gate hard-denies those artifacts.
+- Do NOT create a Writer Task whose job is to prove that Delivery commands leave the
+  worktree unchanged. DeliveryCoordinator owns this invariant deterministically by
+  comparing pre/post candidate tree snapshots. Tasks may add real product tests or smoke
+  scripts, but repository immutability is not a product-code requirement.
+- A Task that adds or changes file, directory, search, or other path-taking tools MUST
+  declare `required_safety_properties: ["path_confinement"]`. Assign it an executable
+  acceptance criterion with `verified_safety_properties: ["path_confinement"]` that
+  attempts a relative `..` escape and emits a stable blocked/error marker listed in
+  `required_output_contains`. The exact id of that safety criterion MUST also appear
+  in that same Task's `acceptance_criteria_ids`; declaring the property on only one
+  side is invalid. For now this relative traversal check is the minimum; do not expand
+  it into a comprehensive security suite.
 
 When done, output ONLY the proposal as ONE JSON object in a ```json code block. Field types:
 - analysis: {
   findings: [{symptom, root_cause, capability_gap, evidence_refs: [str], uncertainty}],
   candidates: [{name, level: prompt|workflow|tool|module|architecture, mechanism,
     expected_capability_delta, evidence_strength: 1-5, benefit: 1-5, risk: 1-5,
-    effort: 1-5, rejected_reason}],
-  selected_candidate, selection_reason, causal_mechanism, expected_capability_delta}
+    effort: 1-5, dependencies: [candidate_name], conflicts_with: [candidate_name],
+    rejected_reason}],
+  selected_candidates: [candidate_name],
+  batch_budget: {max_candidates, max_tasks, max_total_effort, selected_total_effort},
+  packing_reason, compatibility_notes: [str], selection_reason, causal_mechanism,
+  expected_capability_delta}
 - evidence[]: {source_type: trajectory|test|benchmark|code|log, reference: str, observation: str}
 - tasks[] is the immutable contract shared by Writer and Reviewer:
-  {id: str, description: str, rationale: str, capability_change: str,
+  {id: str, candidate: str, description: str, rationale: str, capability_change: str,
   required_behaviors: [{id, description}],
   implementation_constraints: [{id, description}],
   invariants: [{id, description}],
   prohibited_shortcuts: [{id, description}],
   affected_components: [str], reviewer_focus: [str],
+  required_safety_properties: [path_confinement],
   dependencies: [str], acceptance_criteria_ids: [str]}.
   Use unique clause ids within each task (for example RB1, CON1, INV1, PS1).
   `description` is the concrete objective; `capability_change` states what reusable
@@ -139,14 +170,16 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
   check_type: unit|integration|smoke,
   verification: command|review|manual, command: str, expected_exit_code: int,
   required_output_contains: [str], forbidden_output_contains: [str],
+  verified_safety_properties: [path_confinement],
   test_level: full|focused|basic, required: bool}
 - allowed_write_paths[]: the exact approved write scope.
 - benefit/risk/effort: int 1-5; confidence: float 0-1
 - decision: proceed|abstain|needs_human
 - delivery_run[]: system-level integration/smoke commands for the improved agent package.
 - delivery_checklist[]: high-level system requirements the Deliverer can judge from the
-  full diff (selected mechanism is implemented and wired, scope is coherent, no obvious
-  cross-component regression). Do not require it to infer runtime facts.
+  full diff (every selected Candidate is implemented and wired, the combined Batch is
+  compatible, and there is no obvious cross-component regression). Do not require it to
+  infer runtime facts or repeat per-Task review.
 - also: summary, problem_statement, goals[], non_goals[], affected_components[],
   dependencies[], decision_reason, rollback_plan, alternatives_considered[]"""
 
@@ -193,12 +226,9 @@ class Orchestrator:
             self.registry.register(_history_tool(context, self.history_index))
         # 1. run the ReAct loop; collect its final text (the proposal JSON).
         text = await self._investigate(context, max_turns)
-        # 2. validate; on schema failure, do ONE self-correcting repair pass.
-        try:
-            return parse_json_model(text, ImprovementProposal)
-        except ValueError as exc:
-            fixed = await self._repair(text, str(exc))
-            return parse_json_model(fixed, ImprovementProposal)
+        # 2. Schema failures happen before the Pipeline can request a semantic
+        # proposal revision, so repair them here with a small bounded retry budget.
+        return await self._parse_proposal_with_repair(text)
 
     async def revise(self, proposal: ImprovementProposal, problem: str) -> ImprovementProposal:
         """Re-generate the proposal to fix a specific problem (e.g. an invalid DAG)."""
@@ -207,12 +237,33 @@ class Orchestrator:
             f"Your previous proposal had a problem that must be fixed:\n{problem}\n\n"
             f"Previous proposal:\n{proposal.model_dump_json(indent=2)}\n\n"
             "Output ONLY a corrected proposal as a single ```json block — fix the "
-            "problem and keep everything else valid."
+            "problem and keep everything else valid. For a missing safety-property "
+            "mapping, update BOTH sides: tag an executable acceptance criterion with "
+            "`verified_safety_properties`, and add that exact criterion id to the owning "
+            "Task's `acceptance_criteria_ids`."
         )
         text = await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
         )
-        return parse_json_model(text, ImprovementProposal)
+        return await self._parse_proposal_with_repair(text)
+
+    async def _parse_proposal_with_repair(
+        self,
+        text: str,
+        *,
+        max_repairs: int = 2,
+    ) -> ImprovementProposal:
+        """Parse a proposal, feeding exact schema errors back with a bounded budget."""
+
+        candidate = text
+        for repair_i in range(max_repairs + 1):
+            try:
+                return parse_json_model(candidate, ImprovementProposal)
+            except ValueError as exc:
+                if repair_i >= max_repairs:
+                    raise
+                candidate = await self._repair(candidate, str(exc))
+        raise AssertionError("unreachable")
 
     async def _investigate(
         self,

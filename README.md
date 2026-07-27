@@ -1,75 +1,137 @@
-# meta-improve
+# AgentReforge
 
-A **reliability-first, spec-driven, human-in-the-loop self-improving coding agent**.
+AgentReforge is a controlled recursive coding-agent workflow that improves an
+existing agent system from its source code, execution trajectory, and a user
+goal.
 
-meta-improve is a terminal coding agent (ReAct tool loop, memory, RAG, planning,
-multi-agent, MCP, safety, a Runtime API) that can also **improve its own codebase
-through a controlled, evidence-grounded pipeline** — not by unrestricted recursive
-self-modification, but by turning source code, execution trajectories, evaluation
-results, and user intent into a reviewable, measurable, reversible improvement.
+It is not an unrestricted “LLM edits itself forever” loop. Each improvement is
+planned, implemented, reviewed, tested, isolated in Git, and either committed or
+rolled back.
 
-## Why it's different
+> The installable Python package and CLI still use the historical name
+> `metaimprove` / `meta-improve`. AgentReforge is the public project name.
 
-Most self-improving-agent work optimizes for *autonomy*. meta-improve optimizes for
-**control and reliability**:
+## What is implemented
 
-- **Evidence-grounded proposals** — every change is justified by an inspectable
-  trajectory record, code location, or test, not by ungrounded reflection.
-- **Evaluation defined *before* implementation** — acceptance criteria and an
-  evaluation plan are frozen up front (test-driven), so "did it improve?" reduces to
-  "do the pre-approved checks pass?".
-- **A deterministic policy gate** — benefit/risk/effort/confidence and abstention are
-  decided by fixed, explainable rules; the LLM's judgment is *evidence*, not the
-  final authority.
-- **Principled abstention** — the agent knows when *not* to change itself (weak
-  evidence or low expected value → abstain).
-- **Isolation + rollback** — changes are made in a Git worktree, gated by a command
-  blacklist, path sandbox, HITL approval, and content-addressed snapshots.
-- **Human review at the *spec* stage** — reviewers approve the *intent* (cheap)
-  before any code is written.
+- A general ReAct coding agent with local tools, SQLite memory/code index, MCP,
+  and a FastAPI runtime.
+- One evidence-grounded improvement Orchestrator.
+- Two governance modes: `autonomous` and `supervised`.
+- Recursive Runs with one branch/worktree for their full lifetime.
+- One commit per delivered Loop.
+- Bounded Improvement Batches containing one large Candidate or up to three
+  small compatible Candidates.
+- Candidate-owned Tasks with a frozen Writer/Reviewer contract.
+- Deterministic proposal, DAG, policy, write-scope, acceptance, command, and
+  delivery-integrity gates.
+- Task-level agentic review and Batch-level Delivery.
+- Persistent run/loop/component records for audit and next-loop feedback.
 
-See [`docs/self-improving-agent-design.md`](docs/self-improving-agent-design.md) for
-the full pipeline design.
+## Workflow
 
-## The improvement pipeline
-
-```
-trajectory + source + evaluation + intent
-        → Orchestrator (read-only analyst) → ImprovementProposal (RFC + evidence)
-        → deterministic Policy Gate        → proceed / abstain / needs_human
-        → human/agent review + freeze (hash)
-        → Test Agent generates tests from acceptance criteria → baseline
-        → Git worktree isolation
-        → Writer implements + Critic reviews (bounded)
-        → Evaluation Runner (before/after) + Verifier + Policy Gate
-        → report; accept only if all required checks pass, else roll back
+```text
+User intent + target trajectory + current source
+    -> Orchestrator diagnoses and ranks Candidates
+    -> pack one Improvement Batch
+    -> validate proposal, Task DAG, safety, and acceptance contract
+    -> policy gate / optional human approval
+    -> Writer implements each Task
+    -> Reviewer checks each frozen Task contract
+    -> DeliveryCoordinator runs deterministic checks and reviews the full diff
+    -> verify the candidate Git tree is unchanged
+    -> one Loop commit
+    -> feed LoopOutcome to the next Loop, or converge
 ```
 
-## The underlying agent
-
-- OpenAI-compatible streaming LLM client with a unified event model.
-- ReAct tool loop; built-in tools (read/write file, list/glob/grep, bash, code search).
-- Long-term memory (SQLite), local code index (RAG), project instructions (`PAI.md`).
-- Plan-and-Execute and Multi-Agent (Planner/Worker/Reviewer) modes.
-- MCP client (connect external tool servers) + defence-in-depth safety
-  (command guard, path sandbox, HITL, JSONL audit log).
-- A FastAPI Runtime API (threads / turns / events).
+Terminology and detailed invariants are documented in
+[the unified workflow](docs/unified-agent-workflow.md).
 
 ## Quick start
 
 ```bash
 uv sync --extra dev
-export OPENAI_API_KEY=...        # or a provider-specific key
-uv run python -m metaimprove.entrypoints.cli -p "read README.md and summarize it"
+export OPENAI_API_KEY=...
+
+# Run the ordinary coding agent.
+uv run meta-improve -p "inspect this repository and summarize the architecture"
+
+# Improve another Git repository.
+uv run meta-improve improve \
+  --cwd /path/to/target-agent \
+  --intent "Improve repository inspection and verification behavior" \
+  --model gpt-5.4-mini \
+  --mode autonomous \
+  --loops 3 \
+  --keep
 ```
 
-## Status
+AgentReforge does not modify the target's active branch during the run. It creates
+an isolated `improve/...` branch/worktree and keeps it for inspection unless
+`--merge` is explicitly requested.
 
-The base agent and the first half of the improvement pipeline (data contract,
-trajectory persistence, read-only Orchestrator, deterministic policy gate,
-content-addressed snapshots) are implemented. Git-worktree isolation, the
-Writer-Critic loop, the Test Agent, and the evaluation runner are in progress.
+## Reproducible mini-agent demo
+
+The tracked template under `examples/mini-agent/` is intentionally weak. Create
+a fresh standalone Git target:
+
+```bash
+python3 scripts/create_mini_demo.py /tmp/agentreforge-mini-agent
+```
+
+Then run a recursive demo with a maximum of ten Loops:
+
+```bash
+uv run meta-improve improve \
+  --cwd /tmp/agentreforge-mini-agent \
+  --intent "Improve this mini-agent from observed source gaps. Prefer small, \
+evidence-backed capabilities; preserve existing behavior; abstain when no \
+meaningful reusable improvement remains." \
+  --model gpt-5.4-mini \
+  --mode autonomous \
+  --loops 10 \
+  --keep
+```
+
+Ten is a ceiling, not a target. A healthy run should stop when the Orchestrator
+cannot justify another high-value improvement.
+
+## Repository map
+
+```text
+metaimprove/agent/          ordinary ReAct/plan execution components
+metaimprove/improve/        AgentReforge recursive improvement workflow
+metaimprove/orchestration/  shared Task executor
+metaimprove/tools/          local tool contracts and execution
+metaimprove/policy/         command/path safety
+metaimprove/rag/            local code index
+metaimprove/memory/         SQLite memory
+metaimprove/runtime/        FastAPI runtime
+examples/mini-agent/        tracked demo target template
+eval/mini/                  deterministic early-version smoke benchmark
+eval/                       larger experimental coding evaluation
+tests/                      Workflow and component regression tests
+docs/                       architecture and design documentation
+scripts/                    reproducible local demo utilities
+```
+
+See [docs/architecture.md](docs/architecture.md) for module ownership and the
+recommended reading order.
+
+## Evaluation scope
+
+The deterministic mini suite currently establishes a clean non-regression result,
+not a universal coding-capability improvement claim. Agent workflow evaluation is
+high variance and existing model benchmarks do not isolate orchestration quality.
+For this early version, the primary artifact is therefore the inspectable recursive
+demo: proposals, Task reviews, acceptance evidence, diffs, and one commit per Loop.
+
+## Development
+
+```bash
+uv run pytest
+uv run ruff check metaimprove eval tests --exclude eval/solutions
+```
 
 ## License
 
-MIT.
+MIT

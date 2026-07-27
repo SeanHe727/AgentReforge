@@ -349,10 +349,13 @@ def _task_contract_text(spec: ImprovementTask) -> str:
     ]
     lines = [
         f"Shared Task Contract [{spec.id}]",
+        f"Owning Candidate: {spec.candidate or '(legacy/unassigned)'}",
         "Required review clause ids: " + ", ".join(review_clause_ids),
         f"Objective: {spec.description}",
         f"Rationale: {spec.rationale}",
         f"Capability change: {spec.capability_change}",
+        "Required safety properties: "
+        + (", ".join(spec.required_safety_properties) or "(none declared)"),
         "Affected components: "
         + (", ".join(spec.affected_components) or "(use proposal write scope)"),
         *clauses("Required behaviors", spec.required_behaviors),
@@ -377,6 +380,7 @@ def _criteria_text(
         command = f"; run: {criterion.command}" if criterion.command else ""
         lines.append(
             f"- [{criterion.id}/{criterion.check_type}] {criterion.description} "
-            f"(verification={criterion.verification}{command})"
+            f"(verification={criterion.verification}; safety="
+            f"{','.join(criterion.verified_safety_properties) or 'none'}{command})"
         )
     return "\n".join(lines) or "- (none)"

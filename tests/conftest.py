@@ -22,6 +22,7 @@ def make_proposal(**overrides) -> ImprovementProposal:
         "tasks": [
             ImprovementTask(
                 id="implement",
+                candidate="focused fix",
                 description="Implement the behavior",
                 rationale="The missing behavior causes the observed failure.",
                 capability_change="The target agent handles the missing case reliably.",
@@ -47,7 +48,7 @@ def make_proposal(**overrides) -> ImprovementProposal:
                 description="The focused test passes",
                 mode="red_green",
                 check_type="integration",
-                command="python -m pytest tests/test_agent.py",
+                command="python3 -m pytest tests/test_agent.py",
             ),
         ],
     }

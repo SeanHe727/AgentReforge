@@ -243,17 +243,16 @@ class ImprovementPipeline:
                 # A non-delivered loop ends the run. Preserve an earlier verified
                 # version, but report that the recursive run only partially delivered.
                 if not delivered:
-                    result = (
-                        _as_partial(last_success, result)
-                        if last_success is not None
-                        else result
-                    )
+                    if last_success is not None and result.stage == "abstained":
+                        result = _as_converged(last_success, result)
+                    elif last_success is not None:
+                        result = _as_partial(last_success, result)
                     break
                 last_success = result
                 if loop_i + 1 >= self.recursion.max_loops:
                     break
             final = last_success or result or PipelineResult("abstained")
-            if result is not None and result.stage == "partially_delivered":
+            if result is not None and result.stage in {"partially_delivered", "converged"}:
                 final = result
             finalized = await self._finalize(wt, final, manifest, all_results)
             run_record.status = finalized.stage
@@ -505,7 +504,7 @@ class ImprovementPipeline:
         if (
             self.auto_merge
             and delivered
-            and result.stage == "delivered"
+            and result.stage in {"delivered", "converged"}
             and result.proposal is not None
         ):
             msg = f"improve: {result.proposal.summary}"
@@ -544,6 +543,15 @@ class ImprovementPipeline:
             ]
             if final.terminal_error:
                 lines.append(f"- **Terminal error:** {final.terminal_error}")
+        elif final.stage == "converged":
+            lines += [
+                "",
+                "## Convergence",
+                f"- **Last delivered loop:** {final.loop}",
+                f"- **Stop loop:** {final.terminal_loop}",
+                "- **Reason:** Orchestrator abstained; no further evidence-backed "
+                "improvement was justified.",
+            ]
         if final.merged_commit:
             lines.append(f"\n**Merged to main:** {final.merged_commit[:12]}")
         elif final.version:
@@ -553,7 +561,7 @@ class ImprovementPipeline:
         return str(path)
 
     async def _enforce_valid_proposal(
-        self, orch: Orchestrator, proposal: ImprovementProposal, max_tries: int = 2
+        self, orch: Orchestrator, proposal: ImprovementProposal, max_tries: int = 3
     ) -> ImprovementProposal:
         """Hard-validate both the task graph and the executable acceptance contract."""
         tries = 0
@@ -692,7 +700,7 @@ def _target_run_refs(records: list[dict[str, Any]]) -> list[str]:
 
 
 def _analysis_problems(proposal: ImprovementProposal) -> list[str]:
-    """Hard-code the minimum diagnosis/selection trace; prompt compliance is not enough."""
+    """Hard-code Candidate packing invariants; prompt compliance is not enough."""
 
     analysis = proposal.analysis
     problems = []
@@ -700,11 +708,54 @@ def _analysis_problems(proposal: ImprovementProposal) -> list[str]:
         problems.append("at least one symptom/root-cause/capability finding is required")
     if len(analysis.candidates) < 2:
         problems.append("compare at least two intervention candidates")
-    names = {candidate.name for candidate in analysis.candidates}
-    if not analysis.selected_candidate:
-        problems.append("selected_candidate is required")
-    elif analysis.selected_candidate not in names:
-        problems.append("selected_candidate must name one of the candidates")
+    candidates = {candidate.name: candidate for candidate in analysis.candidates}
+    selected = analysis.selected_candidates
+    if not selected:
+        problems.append("selected_candidates must contain at least one Candidate")
+    if len(selected) != len(set(selected)):
+        problems.append("selected_candidates must not contain duplicates")
+    unknown = [name for name in selected if name not in candidates]
+    if unknown:
+        problems.append(
+            "selected_candidates must name declared candidates: " + ", ".join(unknown)
+        )
+    budget = analysis.batch_budget
+    if len(selected) > budget.max_candidates:
+        problems.append("selected Candidate count exceeds batch_budget.max_candidates")
+    if len(proposal.tasks) > budget.max_tasks:
+        problems.append("Task count exceeds batch_budget.max_tasks")
+    selected_candidates = [candidates[name] for name in selected if name in candidates]
+    total_effort = sum(candidate.effort for candidate in selected_candidates)
+    if total_effort > budget.max_total_effort:
+        problems.append("selected Candidate effort exceeds batch_budget.max_total_effort")
+    if budget.selected_total_effort != total_effort:
+        problems.append("batch_budget.selected_total_effort does not match selected Candidates")
+    if len(selected_candidates) > 1 and any(c.effort > 2 for c in selected_candidates):
+        problems.append("multi-Candidate batches may contain only small Candidates (effort <= 2)")
+    if len(selected_candidates) > 1 and not analysis.compatibility_notes:
+        problems.append("multi-Candidate batches require compatibility_notes")
+    conflict_pairs = {
+        tuple(sorted((candidate.name, conflict)))
+        for candidate in selected_candidates
+        for conflict in candidate.conflicts_with
+        if conflict in selected
+    }
+    if conflict_pairs:
+        rendered = ", ".join(f"{left}<->{right}" for left, right in sorted(conflict_pairs))
+        problems.append(f"selected Candidates conflict: {rendered}")
+    task_candidates = [task.candidate for task in proposal.tasks]
+    missing_owner = [task.id for task in proposal.tasks if task.candidate not in selected]
+    if missing_owner:
+        problems.append(
+            "every Task must name an owning selected Candidate: " + ", ".join(missing_owner)
+        )
+    unimplemented = [name for name in selected if name not in task_candidates]
+    if unimplemented:
+        problems.append(
+            "every selected Candidate must own at least one Task: " + ", ".join(unimplemented)
+        )
+    if not analysis.packing_reason.strip():
+        problems.append("packing_reason is required")
     if not analysis.causal_mechanism.strip():
         problems.append("causal_mechanism is required")
     if not analysis.expected_capability_delta.strip():
@@ -894,6 +945,17 @@ def _as_partial(success: PipelineResult, terminal: PipelineResult) -> PipelineRe
     success.terminal_error = terminal.error or (
         "; ".join(terminal.delivery.reasons) if terminal.delivery else ""
     )
+    return success
+
+
+def _as_converged(success: PipelineResult, terminal: PipelineResult) -> PipelineResult:
+    """Preserve the last delivered commit when the next Loop intentionally abstains."""
+
+    success.stage = "converged"
+    success.terminal_stage = terminal.stage
+    success.terminal_loop = terminal.loop
+    success.terminal_report_path = terminal.report_path
+    success.terminal_error = terminal.error
     return success
 
 

@@ -73,7 +73,8 @@ def test_goal_review_message_is_proposal_and_diff_not_command_output():
                     expected_capability_delta="repository awareness",
                 )
             ],
-            selected_candidate="navigation tools",
+            selected_candidates=["navigation tools"],
+            packing_reason="one bounded Candidate fits the batch budget",
             causal_mechanism="wire tools into the active tool surface",
             expected_capability_delta="repository awareness",
         ),

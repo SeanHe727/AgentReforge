@@ -231,7 +231,15 @@ def _summarize_reforge_loop(record: ReforgeLoopRecord) -> ReforgeLoopSummary:
         stage=record.stage,
         proposal_summary=record.proposal_summary,
         capability_gaps=capability_gaps,
-        selected_candidate=str(record.diagnosis.get("selected_candidate") or ""),
+        selected_candidates=[
+            str(value)
+            for value in (record.diagnosis.get("selected_candidates") or [])
+            if value
+        ] or (
+            [str(record.diagnosis["selected_candidate"])]
+            if record.diagnosis.get("selected_candidate")
+            else []
+        ),
         changed_paths=record.changed_paths,
         component_status={
             component.component: component.status for component in record.components

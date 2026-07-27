@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # --- primitives -----------------------------------------------------------------
 
@@ -57,6 +57,10 @@ class ImprovementTask(BaseModel):
     # implements it and the Reviewer audits the same clauses; neither side gets
     # to redefine success during execution.
     id: str
+    # Name of the selected Candidate this Task implements. Multiple Tasks may
+    # belong to one large Candidate; small independent Candidates normally map
+    # to separate Tasks within the same Improvement Batch.
+    candidate: str = ""
     description: str
     rationale: str = ""
     capability_change: str = ""
@@ -66,6 +70,12 @@ class ImprovementTask(BaseModel):
     prohibited_shortcuts: list[ContractClause] = Field(default_factory=list)
     affected_components: list[str] = Field(default_factory=list)
     reviewer_focus: list[str] = Field(default_factory=list)
+    # Named safety properties that must be covered by assigned executable
+    # acceptance criteria. Keep this small and extensible instead of embedding
+    # tool-specific checks in the Reviewer prompt.
+    required_safety_properties: list[Literal["path_confinement"]] = Field(
+        default_factory=list
+    )
     dependencies: list[str] = Field(default_factory=list)
     acceptance_criteria_ids: list[str] = Field(default_factory=list)
 
@@ -110,6 +120,9 @@ class AcceptanceCriterion(BaseModel):
     expected_exit_code: int = 0
     required_output_contains: list[str] = Field(default_factory=list)
     forbidden_output_contains: list[str] = Field(default_factory=list)
+    verified_safety_properties: list[Literal["path_confinement"]] = Field(
+        default_factory=list
+    )
     # rigor of the functional test the Test Agent generates:
     #   full    -> core/framework: happy path + edges + error handling + invariants
     #   focused -> important logic: unit test asserting key values + intermediates
@@ -166,18 +179,48 @@ class InterventionCandidate(BaseModel):
     benefit: int = 1
     risk: int = 1
     effort: int = 1
+    dependencies: list[str] = Field(default_factory=list)
+    conflicts_with: list[str] = Field(default_factory=list)
     rejected_reason: str = ""
 
 
+class ImprovementBatchBudget(BaseModel):
+    """The Orchestrator's bounded packing decision for one Loop."""
+
+    max_candidates: int = Field(default=3, ge=1, le=3)
+    max_tasks: int = Field(default=6, ge=1, le=6)
+    max_total_effort: int = Field(default=6, ge=1, le=6)
+    selected_total_effort: int = Field(default=0, ge=0, le=6)
+
+
 class OrchestratorAnalysis(BaseModel):
-    """The decision trace that explains why the selected proposal should work."""
+    """Diagnosis plus Candidate packing for one Improvement Batch."""
 
     findings: list[DiagnosticFinding] = Field(default_factory=list)
     candidates: list[InterventionCandidate] = Field(default_factory=list)
-    selected_candidate: str = ""
+    selected_candidates: list[str] = Field(default_factory=list)
+    batch_budget: ImprovementBatchBudget = Field(default_factory=ImprovementBatchBudget)
+    packing_reason: str = ""
+    compatibility_notes: list[str] = Field(default_factory=list)
     selection_reason: str = ""
     causal_mechanism: str = ""
     expected_capability_delta: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_singular_selection(cls, value):
+        """Read older proposal JSON that used ``selected_candidate``."""
+        if isinstance(value, dict):
+            data = dict(value)
+            if not data.get("selected_candidates") and data.get("selected_candidate"):
+                data["selected_candidates"] = [str(data["selected_candidate"])]
+            return data
+        return value
+
+    @property
+    def selected_candidate(self) -> str:
+        """Compatibility view for older callers; new code uses the plural field."""
+        return self.selected_candidates[0] if self.selected_candidates else ""
 
 
 # --- the central artifact -------------------------------------------------------

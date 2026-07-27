@@ -18,18 +18,21 @@ The per-task Reviewer has already checked local implementation details. A separa
 deterministic AcceptanceRunner has already executed the frozen acceptance commands.
 Do NOT act as another test agent and do NOT invent runtime claims.
 
-You receive the frozen Orchestrator goal/diagnosis/selected causal mechanism and the
-FULL DIFF for this improvement loop. Judge only whether the change, as a coherent
-whole, actually realizes that proposal:
+You receive the frozen Orchestrator goal/diagnosis/selected Candidates and the FULL
+DIFF for this Improvement Batch. Judge only whether the combined change realizes the
+proposal:
 
-1. Goal realization — does the diff implement the selected intervention and causal
-   mechanism, rather than merely adding names, prompts, stubs, or unreachable code?
+1. Candidate realization — does the diff implement EVERY selected Candidate and its
+   causal mechanism, rather than merely adding names, prompts, stubs, or unreachable code?
 2. Integration — are new interfaces wired into the real execution path, with no
    missing cross-component changes visible in the diff?
-3. Scope and consistency — is the whole change consistent with the repository and
-   within the approved intent, without an obvious cross-cutting regression?
+3. Batch compatibility — can the selected Candidates coexist without an obvious
+   cross-cutting regression, interface conflict, or scope violation?
 4. Evidence discipline — distinguish what the diff proves from what would require a
    later target-agent capability evaluation. Do not claim benchmark/output quality.
+
+Do not repeat per-Task review and do not judge whether commands mutated the repository;
+the independent Reviewer and deterministic DeliveryCoordinator already own those checks.
 
 Reply with:
 GOAL: ACHIEVED or GOAL: NOT ACHIEVED
@@ -87,7 +90,11 @@ class Deliverer:
 def goal_review_message(proposal: ImprovementProposal, loop_diff: str) -> str:
     analysis = proposal.analysis
     goals = "\n".join(f"- {goal}" for goal in proposal.goals) or "- (none)"
-    tasks = "\n".join(f"- [{task.id}] {task.description}" for task in proposal.tasks)
+    selected = "\n".join(f"- {name}" for name in analysis.selected_candidates) or "- (none)"
+    tasks = "\n".join(
+        f"- [{task.id}] Candidate={task.candidate}: {task.description}"
+        for task in proposal.tasks
+    )
     requirements = (
         "\n".join(f"- {item}" for item in proposal.delivery_checklist) or "- (none)"
     )
@@ -95,7 +102,8 @@ def goal_review_message(proposal: ImprovementProposal, loop_diff: str) -> str:
         f"Proposal summary:\n{proposal.summary}\n\n"
         f"Problem:\n{proposal.problem_statement}\n\n"
         f"Goals:\n{goals}\n\n"
-        f"Selected intervention:\n{analysis.selected_candidate}\n\n"
+        f"Selected Candidates:\n{selected}\n\n"
+        f"Batch packing rationale:\n{analysis.packing_reason}\n\n"
         f"Causal mechanism:\n{analysis.causal_mechanism}\n\n"
         f"Expected capability delta:\n{analysis.expected_capability_delta}\n\n"
         f"Planned tasks:\n{tasks}\n\n"
