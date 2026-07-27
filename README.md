@@ -88,32 +88,6 @@ The comparison shows the bounded capability change, including the generated
 prompt and tool-safety changes. It is an inspectable demonstration, not a claim
 of universal coding-capability improvement.
 
-## Reproducible mini-agent demo
-
-The tracked template under `examples/mini-agent/` is intentionally weak. Create
-a fresh standalone Git target:
-
-```bash
-python3 scripts/create_mini_demo.py /tmp/agentreforge-mini-agent
-```
-
-Then run a recursive demo with a maximum of ten Loops:
-
-```bash
-uv run meta-improve improve \
-  --cwd /tmp/agentreforge-mini-agent \
-  --intent "Improve this mini-agent from observed source gaps. Prefer small, \
-evidence-backed capabilities; preserve existing behavior; abstain when no \
-meaningful reusable improvement remains." \
-  --model gpt-5.4-mini \
-  --mode autonomous \
-  --loops 10 \
-  --keep
-```
-
-Ten is a ceiling, not a target. A healthy run should stop when the Orchestrator
-cannot justify another high-value improvement.
-
 ## Repository map
 
 ```text
@@ -125,12 +99,11 @@ metaimprove/policy/         command/path safety
 metaimprove/rag/            local code index
 metaimprove/memory/         SQLite memory
 metaimprove/runtime/        FastAPI runtime
-examples/mini-agent/        tracked demo target template
 eval/mini/                  deterministic early-version smoke benchmark
 eval/                       larger experimental coding evaluation
 tests/                      Workflow and component regression tests
 docs/                       architecture and design documentation
-scripts/                    reproducible local demo utilities
+scripts/                    local project utilities
 ```
 
 See [docs/architecture.md](docs/architecture.md) for module ownership and the
