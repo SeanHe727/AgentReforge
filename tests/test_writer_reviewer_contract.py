@@ -26,6 +26,14 @@ def test_writer_and_reviewer_share_one_traceable_task_contract():
     assert "Executable acceptance checks:" in reviewer_brief
 
 
+def test_writer_prompt_forbids_inventing_paths_outside_task_scope():
+    from metaimprove.improve.writer_reviewer import WRITER_PROMPT_SUFFIX
+
+    assert "Modify only the exact files listed under Affected components" in (
+        WRITER_PROMPT_SUFFIX
+    )
+
+
 def test_reviewer_cannot_approve_without_covering_every_contract_clause():
     task = (
         "Shared Task Contract [implement]\n"

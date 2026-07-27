@@ -32,6 +32,7 @@ def make_proposal(**overrides) -> ImprovementProposal:
                 invariants=[
                     ContractClause(id="INV1", description="Preserve existing behavior.")
                 ],
+                affected_components=["src/agent.py"],
                 reviewer_focus=["Confirm the missing case is handled without a shortcut."],
                 acceptance_criteria_ids=["ac1"],
             )

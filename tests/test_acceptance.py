@@ -34,6 +34,19 @@ def test_acceptance_contract_requires_scope_and_command():
     assert "has no command" in result.summary()
 
 
+def test_required_acceptance_criterion_must_be_executable():
+    proposal = make_proposal()
+    criterion = proposal.acceptance_criteria[0]
+    criterion.mode = "manual"
+    criterion.verification = "review"
+    criterion.command = ""
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "must use executable command verification" in result.summary()
+
+
 def test_acceptance_contract_rejects_thin_writer_reviewer_handoff():
     proposal = make_proposal()
     task = proposal.tasks[0]
@@ -53,6 +66,20 @@ def test_acceptance_contract_rejects_thin_writer_reviewer_handoff():
     assert "has no required_behaviors" in result.summary()
     assert "has no invariants" in result.summary()
     assert "has no reviewer_focus" in result.summary()
+
+
+def test_task_affected_components_must_be_concrete_and_authorized():
+    proposal = make_proposal()
+    task = proposal.tasks[0]
+    task.affected_components = ["src/agent.py", "new or updated test path"]
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert (
+        "affected_components exceed allowed_write_paths: new or updated test path"
+        in result.summary()
+    )
 
 
 def test_acceptance_contract_requires_unique_traceable_clause_ids():
@@ -85,6 +112,7 @@ def test_path_tool_task_requires_executable_traversal_acceptance():
     proposal = make_proposal()
     task = proposal.tasks[0]
     criterion = proposal.acceptance_criteria[0]
+    proposal.allowed_write_paths = ["coder/tools.py"]
     task.affected_components = ["coder/tools.py"]
     task.description = "Add repository navigation and directory-listing tools"
 

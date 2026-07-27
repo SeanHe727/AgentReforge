@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import shutil
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 
 from .models import AcceptanceCriterion, ImprovementProposal, ImprovementTask
 
@@ -36,6 +37,7 @@ def validate_acceptance(proposal: ImprovementProposal) -> AcceptanceValidation:
     assigned: set[str] = set()
     for task in proposal.tasks:
         _validate_task_contract(task, errors)
+        _validate_task_write_scope(task, proposal.allowed_write_paths, errors)
         if not task.acceptance_criteria_ids:
             errors.append(f"task {task.id!r} has no acceptance_criteria_ids")
         unknown = sorted(set(task.acceptance_criteria_ids) - known)
@@ -57,6 +59,10 @@ def validate_acceptance(proposal: ImprovementProposal) -> AcceptanceValidation:
         errors.append(f"required criteria are not assigned to a task: {', '.join(unassigned)}")
 
     for criterion in criteria:
+        if criterion.required and criterion.verification != "command":
+            errors.append(
+                f"required criterion {criterion.id!r} must use executable command verification"
+            )
         if criterion.verification == "command" and not criterion.command.strip():
             errors.append(f"command criterion {criterion.id!r} has no command")
         elif criterion.verification == "command":
@@ -111,6 +117,39 @@ def _validate_task_contract(task: ImprovementTask, errors: list[str]) -> None:
             errors.append(
                 f"task {task.id!r} clause {clause.id!r} has no description"
             )
+
+
+def _validate_task_write_scope(
+    task: ImprovementTask,
+    allowed_write_paths: list[str],
+    errors: list[str],
+) -> None:
+    """Ensure every Writer hand-off names files already authorized by the proposal."""
+
+    if not task.affected_components:
+        errors.append(f"task {task.id!r} has no affected_components")
+        return
+    outside = [
+        component
+        for component in task.affected_components
+        if not _matches_write_scope(component, allowed_write_paths)
+    ]
+    if outside:
+        errors.append(
+            f"task {task.id!r} affected_components exceed allowed_write_paths: "
+            + ", ".join(outside)
+        )
+
+
+def _matches_write_scope(path: str, scopes: list[str]) -> bool:
+    path = path.removeprefix("./")
+    for scope in scopes:
+        scope = scope.removeprefix("./")
+        if scope.endswith("/") and path.startswith(scope):
+            return True
+        if path == scope or fnmatch(path, scope):
+            return True
+    return False
 
 
 def _validate_command_executable(command: str, label: str, errors: list[str]) -> None:

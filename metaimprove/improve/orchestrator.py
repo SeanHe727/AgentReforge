@@ -109,6 +109,10 @@ Rules:
   directory prefixes ending in "/", or glob patterns. Keep authorization narrow around
   the selected Improvement Batch; do not use this safety rule to bias solution selection
   toward superficial local edits.
+- Every Task's `affected_components` MUST contain concrete repo-relative file paths
+  covered by `allowed_write_paths`. If a Task will create a file, choose its exact path
+  now and include that path in both fields; placeholders such as "new test path" are
+  invalid.
 - Define a traceable acceptance contract. Every task references one or more criterion
   ids; every required criterion is assigned to a task. Required criteria should use
   `verification: "command"` with a safe, concrete command. The pipeline validates this

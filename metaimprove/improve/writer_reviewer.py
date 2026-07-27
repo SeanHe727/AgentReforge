@@ -45,6 +45,8 @@ Own the task through a coherent candidate:
 - Treat the supplied Shared Task Contract as immutable. Implement every required
   behavior, preserve every invariant, obey every implementation constraint, and
   do not use a prohibited shortcut.
+- Modify only the exact files listed under Affected components. Never invent another
+  file path; report a deviation instead if the frozen scope cannot satisfy the task.
 - Inspect the relevant code before editing.
 - Make focused changes, then run the task's executable acceptance commands.
 - Self-inspect the final task diff.
