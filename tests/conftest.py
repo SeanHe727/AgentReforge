@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from metaimprove.improve.models import (
     AcceptanceCriterion,
+    ContractClause,
     Evidence,
     ImprovementProposal,
     ImprovementTask,
@@ -22,6 +23,15 @@ def make_proposal(**overrides) -> ImprovementProposal:
             ImprovementTask(
                 id="implement",
                 description="Implement the behavior",
+                rationale="The missing behavior causes the observed failure.",
+                capability_change="The target agent handles the missing case reliably.",
+                required_behaviors=[
+                    ContractClause(id="RB1", description="Handle the missing case.")
+                ],
+                invariants=[
+                    ContractClause(id="INV1", description="Preserve existing behavior.")
+                ],
+                reviewer_focus=["Confirm the missing case is handled without a shortcut."],
                 acceptance_criteria_ids=["ac1"],
             )
         ],
@@ -36,8 +46,9 @@ def make_proposal(**overrides) -> ImprovementProposal:
                 id="ac1",
                 description="The focused test passes",
                 mode="red_green",
+                check_type="integration",
                 command="python -m pytest tests/test_agent.py",
-            )
+            ),
         ],
     }
     values.update(overrides)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.parse import parse_json_model
 from ..observability import traceable
 from ..orchestration.task_executor import ExecutorConfig, TaskExecutor
 from ..plan.models import ExecutionPlan, Task
@@ -23,6 +24,7 @@ from .models import (
     ImprovementProposal,
     ImprovementTask,
     ReviewResult,
+    WriterReport,
 )
 from .reviewer import AgenticReviewer
 from .worktree import WorktreeSession
@@ -40,14 +42,35 @@ CRITICAL editing rules:
   content)", "# rest unchanged", or "# ...". Leave untouched code exactly as it is.
 
 Own the task through a coherent candidate:
+- Treat the supplied Shared Task Contract as immutable. Implement every required
+  behavior, preserve every invariant, obey every implementation constraint, and
+  do not use a prohibited shortcut.
 - Inspect the relevant code before editing.
 - Make focused changes, then run the task's executable acceptance commands.
-- Self-inspect the final task diff and report the commands you ran and their results.
+- Self-inspect the final task diff.
 - The Orchestrator invokes an independent read-only Reviewer after you finish. Address
   its concrete findings in the next bounded round; do not negotiate scope with it.
 
-If a Reviewer rejected a previous attempt, address the feedback directly. When done,
-briefly state what you changed and why."""
+If a Reviewer rejected a previous attempt, address the feedback directly.
+
+FINAL RESPONSE CONTRACT:
+When done, output exactly one ```json block containing a WriterReport:
+{
+  "task_id": "the assigned task id",
+  "summary": "what changed and why",
+  "changed_files": ["repo/relative/path"],
+  "clause_evidence": [
+    {"clause_id": "RB1", "implementation": "what implements it",
+     "evidence": "file:line or observed behavior"}
+  ],
+  "commands_run": [
+    {"command": "exact command", "exit_code": 0, "output_summary": "key result"}
+  ],
+  "known_limitations": [],
+  "deviations": []
+}
+Include one clause_evidence entry for every required review clause id. Do not claim
+commands you did not run. The report is evidence for review, not proof by itself."""
 
 
 @dataclass
@@ -59,8 +82,11 @@ class TaskOutcome:
     rounds: int
     review: ReviewResult
     writer_summary: str
+    writer_report: WriterReport | None = None
     commit: str | None = None
     attempts: list[str] = field(default_factory=list)
+    phase: str = "implementation"  # implementation | repair
+    repair_iteration: int = 0
 
 
 @dataclass
@@ -157,7 +183,7 @@ class WriterReviewer:
             code_index=code_index,
         )
 
-        return await self._to_outcome(result, worktree)
+        return await self._to_outcome(result, worktree, phase="implementation")
 
     async def repair(
         self,
@@ -197,13 +223,19 @@ class WriterReviewer:
             config=config,
             system_prompt=system_prompt,
             build_task_message=lambda task, pl, fb: _repair_message(instruction, fb),
-            task_brief=lambda task: instruction,
+            task_brief=lambda task: _repair_brief(instruction),
             memory=memory,
             code_index=code_index,
         )
-        return await self._to_outcome(result, worktree)
+        return await self._to_outcome(result, worktree, phase="repair")
 
-    async def _to_outcome(self, result: Any, worktree: WorktreeSession) -> ExecutionOutcome:
+    async def _to_outcome(
+        self,
+        result: Any,
+        worktree: WorktreeSession,
+        *,
+        phase: str,
+    ) -> ExecutionOutcome:
         """Adapt the executor's ExecutionResult to the pipeline's ExecutionOutcome."""
         outcomes = [
             TaskOutcome(
@@ -212,8 +244,10 @@ class WriterReviewer:
                 rounds=tr.rounds,
                 review=tr.review or ReviewResult(verdict="revise", summary="no review"),
                 writer_summary=tr.result,
+                writer_report=_parse_writer_report(tr.result),
                 commit=tr.commit,
                 attempts=tr.attempts,
+                phase=phase,
             )
             for tr in result.tasks
         ]
@@ -228,11 +262,28 @@ class WriterReviewer:
 
 def _repair_message(instruction: str, feedback: ReviewResult | None) -> str:
     """Build the Writer's prompt for a repair task."""
-    lines = [WRITER_PROMPT_SUFFIX.strip(), f"\nRepair task: {instruction}"]
+    lines = [WRITER_PROMPT_SUFFIX.strip(), f"\n{_repair_brief(instruction)}"]
     if feedback and feedback.findings:
         fb = "\n".join(f"- {f.description}" for f in feedback.findings)
         lines.append(f"\nThe Reviewer REJECTED your previous attempt. Fix these:\n{fb}")
     return "\n".join(lines)
+
+
+def _repair_brief(instruction: str) -> str:
+    return (
+        "Shared Task Contract [repair]\n"
+        "Required review clause ids: REPAIR1\n"
+        f"Objective: {instruction}\n"
+        "Required behaviors:\n"
+        "- [REPAIR1] Resolve the reported delivery failure without regressing the candidate."
+    )
+
+
+def _parse_writer_report(text: str) -> WriterReport | None:
+    try:
+        return parse_json_model(text, WriterReport)
+    except ValueError:
+        return None
 
 
 def _task_brief(
@@ -241,7 +292,7 @@ def _task_brief(
 ) -> str:
     """What THIS task should do — the Reviewer's goal-realization anchor."""
     checks = _criteria_text(spec, criteria)
-    return f"{spec.description}\n\nAcceptance contract:\n{checks}"
+    return f"{_task_contract_text(spec)}\n\nExecutable acceptance checks:\n{checks}"
 
 
 def _writer_message(
@@ -253,8 +304,8 @@ def _writer_message(
     """Build the Writer's prompt: task + done prerequisites + prior feedback."""
     lines = [
         WRITER_PROMPT_SUFFIX.strip(),
-        f"\nTask [{spec.id}]: {spec.description}",
-        f"\nAcceptance contract:\n{_criteria_text(spec, criteria)}",
+        f"\n{_task_contract_text(spec)}",
+        f"\nExecutable acceptance checks:\n{_criteria_text(spec, criteria)}",
     ]
     # include the descriptions of already-completed prerequisites for context.
     done_deps = [
@@ -277,6 +328,43 @@ def _writer_message(
     return "\n".join(lines)
 
 
+def _task_contract_text(spec: ImprovementTask) -> str:
+    """Render the same immutable task contract for both Writer and Reviewer."""
+
+    def clauses(title: str, values: list[Any]) -> list[str]:
+        lines = [f"{title}:"]
+        lines.extend(f"- [{item.id}] {item.description}" for item in values)
+        if len(lines) == 1:
+            lines.append("- (none declared)")
+        return lines
+
+    review_clause_ids = [
+        clause.id
+        for clause in (
+            *spec.required_behaviors,
+            *spec.implementation_constraints,
+            *spec.invariants,
+            *spec.prohibited_shortcuts,
+        )
+    ]
+    lines = [
+        f"Shared Task Contract [{spec.id}]",
+        "Required review clause ids: " + ", ".join(review_clause_ids),
+        f"Objective: {spec.description}",
+        f"Rationale: {spec.rationale}",
+        f"Capability change: {spec.capability_change}",
+        "Affected components: "
+        + (", ".join(spec.affected_components) or "(use proposal write scope)"),
+        *clauses("Required behaviors", spec.required_behaviors),
+        *clauses("Implementation constraints", spec.implementation_constraints),
+        *clauses("Invariants", spec.invariants),
+        *clauses("Prohibited shortcuts", spec.prohibited_shortcuts),
+        "Reviewer focus:",
+        *(f"- {focus}" for focus in spec.reviewer_focus),
+    ]
+    return "\n".join(lines)
+
+
 def _criteria_text(
     spec: ImprovementTask,
     criteria: dict[str, AcceptanceCriterion],
@@ -288,7 +376,7 @@ def _criteria_text(
             continue
         command = f"; run: {criterion.command}" if criterion.command else ""
         lines.append(
-            f"- [{criterion.id}] {criterion.description} "
+            f"- [{criterion.id}/{criterion.check_type}] {criterion.description} "
             f"(verification={criterion.verification}{command})"
         )
     return "\n".join(lines) or "- (none)"

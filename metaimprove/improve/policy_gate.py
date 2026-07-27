@@ -32,11 +32,25 @@ class GatePolicy:
             ".github/",
         ]
     )
+    # Generated runtime artifacts are never product changes and cannot be
+    # human-approved into a delivered candidate.
+    forbidden_artifacts: list[str] = field(
+        default_factory=lambda: [
+            "__pycache__",
+            "*.pyc",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".coverage",
+            "coverage.xml",
+            ".coder_state.json",
+        ]
+    )
 
 
 @dataclass
 class GateDecision:
-    decision: Literal["proceed", "abstain", "needs_human"]
+    decision: Literal["proceed", "abstain", "needs_human", "deny"]
     reasons: list[str]
 
 
@@ -92,11 +106,17 @@ def evaluate_changes(
 ) -> GateDecision:
     """Check the real Writer output against the approved scope before delivery."""
     policy = policy or GatePolicy()
+    forbidden = _forbidden_artifact_hits(changed_paths, policy.forbidden_artifacts)
     protected = _protected_path_hits(changed_paths, policy.protected_paths)
     outside = [
         path for path in changed_paths if not _matches_scope(path, proposal.allowed_write_paths)
     ]
     reasons: list[str] = []
+    if forbidden:
+        return GateDecision(
+            "deny",
+            [f"actual diff contains generated artifacts: {', '.join(forbidden)}"],
+        )
     if protected:
         reasons.append(f"actual diff touches protected paths: {', '.join(protected)}")
     if outside:
@@ -104,6 +124,21 @@ def evaluate_changes(
     if reasons:
         return GateDecision("needs_human", reasons)
     return GateDecision("proceed", ["actual diff stays within the approved write scope"])
+
+
+def _forbidden_artifact_hits(paths: list[str], patterns: list[str]) -> list[str]:
+    hits: list[str] = []
+    for path in paths:
+        clean = path.removeprefix("./")
+        parts = clean.split("/")
+        if any(
+            fnmatch.fnmatch(clean, pattern)
+            or fnmatch.fnmatch(parts[-1], pattern)
+            or pattern in parts
+            for pattern in patterns
+        ):
+            hits.append(path)
+    return hits
 
 
 def _protected_hits(proposal: ImprovementProposal, protected: list[str]) -> list[str]:

@@ -4,8 +4,17 @@ import asyncio
 
 from conftest import make_proposal
 
-from metaimprove.improve.deliverer import Delivery
-from metaimprove.improve.pipeline import ImprovementPipeline
+from metaimprove.improve.delivery_coordinator import Delivery
+from metaimprove.improve.models import ReviewResult
+from metaimprove.improve.pipeline import (
+    ImprovementPipeline,
+    ImprovementVersion,
+    PipelineResult,
+    _as_partial,
+    _combine_execution_outcomes,
+    _repair_instruction,
+)
+from metaimprove.improve.writer_reviewer import ExecutionOutcome, TaskOutcome
 from metaimprove.tools.registry import ToolRegistry
 
 
@@ -79,3 +88,91 @@ def test_delivery_mutation_is_rejected_and_reported():
     assert delivery.verified_tree == ""
     assert delivery.mutation_diff == "delivery mutation"
     assert "mutated the candidate" in delivery.reasons[0]
+
+
+def test_later_loop_failure_is_reported_as_partial_delivery():
+    success = PipelineResult(
+        stage="delivered",
+        loop=0,
+        delivery=Delivery(passed=True),
+        version=ImprovementVersion(
+            loop=0,
+            base_commit="base",
+            branch="improve/test",
+            verified_commit="verified",
+            proposal_hash="proposal",
+            evaluation_hash="",
+        ),
+    )
+    terminal = PipelineResult(
+        stage="rejected_delivery",
+        loop=1,
+        delivery=Delivery(passed=False, reasons=["bad command"]),
+        report_path="/tmp/terminal.md",
+    )
+
+    result = _as_partial(success, terminal)
+
+    assert result.stage == "partially_delivered"
+    assert result.version.verified_commit == "verified"
+    assert result.terminal_loop == 1
+    assert result.terminal_stage == "rejected_delivery"
+    assert result.terminal_error == "bad command"
+    assert result.terminal_report_path == "/tmp/terminal.md"
+
+
+def test_delivery_repair_appends_to_original_task_history():
+    original = ExecutionOutcome(
+        completed=True,
+        task_outcomes=[
+            TaskOutcome(
+                task_id="t1",
+                status="completed",
+                rounds=1,
+                review=ReviewResult(verdict="accept"),
+                writer_summary="implemented tools",
+                phase="implementation",
+            )
+        ],
+        diff="initial diff",
+    )
+    repair = ExecutionOutcome(
+        completed=True,
+        task_outcomes=[
+            TaskOutcome(
+                task_id="repair",
+                status="completed",
+                rounds=1,
+                review=ReviewResult(verdict="accept"),
+                writer_summary="fixed import",
+                phase="repair",
+                repair_iteration=1,
+            )
+        ],
+        diff="repaired diff",
+    )
+
+    combined = _combine_execution_outcomes(original, repair)
+
+    assert combined.completed
+    assert [task.task_id for task in combined.task_outcomes] == ["t1", "repair"]
+    assert [task.phase for task in combined.task_outcomes] == ["implementation", "repair"]
+    assert combined.task_outcomes[1].repair_iteration == 1
+    assert combined.diff == "repaired diff"
+
+
+def test_repair_instruction_includes_output_assertion_failures_with_exit_zero():
+    delivery = Delivery(
+        passed=False,
+        hard_gate_ok=False,
+        acceptance_failures=["ac1: output missing 'verify'"],
+        runs=[],
+        goal_accepted=True,
+        goal_review="GOAL: ACHIEVED\nVERDICT: ACCEPT",
+    )
+
+    instruction = _repair_instruction(delivery)
+
+    assert "AcceptanceRunner failures" in instruction
+    assert "ac1: output missing 'verify'" in instruction
+    assert "Deliverer goal review" not in instruction

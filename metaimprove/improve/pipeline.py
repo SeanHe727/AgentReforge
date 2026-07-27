@@ -30,11 +30,14 @@ from typing import Any
 
 from ..llm.base import LlmClient
 from ..observability import traceable
+from ..rag.code_index import CodeIndex
 from ..tools.builtins import get_builtin_tools
 from ..tools.registry import ToolRegistry
 from . import policy_gate
 from .acceptance import validate_acceptance
-from .deliverer import Deliverer, Delivery
+from .context import OrchestratorContextBuilder
+from .delivery_coordinator import Delivery, DeliveryCoordinator
+from .history_index import ImprovementHistoryIndex
 from .models import (
     ExecutionBlocker,
     FrozenProposal,
@@ -43,6 +46,13 @@ from .models import (
 from .orchestrator import Orchestrator
 from .plan_validator import validate_plan
 from .policy_gate import GateDecision, GatePolicy
+from .records import (
+    ComponentRecord,
+    ImprovementRecordStore,
+    RecursiveRunRecord,
+    ReforgeLoopRecord,
+    jsonable,
+)
 from .run_config import (
     DetailLevel,
     GovernanceMode,
@@ -70,7 +80,10 @@ Approver = Callable[[ImprovementProposal, GateDecision], Awaitable[Approval]]
 async def auto_approve(proposal: ImprovementProposal, decision: GateDecision) -> Approval:
     """Default non-interactive approver: approve anything the gate didn't abstain
     on. Real deployments inject a human-in-the-loop approver instead."""
-    return Approval(approved=decision.decision != "abstain", approved_by="auto")
+    return Approval(
+        approved=decision.decision in ("proceed", "needs_human"),
+        approved_by="auto",
+    )
 
 
 @dataclass
@@ -87,7 +100,7 @@ class ImprovementVersion:
 @dataclass
 class PipelineResult:
     # where the run ended and everything it produced, for the caller + report.
-    stage: str  # abstained|rejected|needs_human|blocked|failed|rejected_delivery|delivered|merged
+    stage: str  # includes rejected_policy|partially_delivered plus loop terminal stages
     proposal: ImprovementProposal | None = None
     gate: GateDecision | None = None
     approval: Approval | None = None
@@ -105,6 +118,10 @@ class PipelineResult:
     # run-level (set on the final result the caller sees).
     manifest: dict[str, Any] = field(default_factory=dict)
     run_report_path: str | None = None
+    terminal_stage: str = ""
+    terminal_loop: int | None = None
+    terminal_report_path: str | None = None
+    terminal_error: str = ""
 
 
 class ImprovementPipeline:
@@ -119,7 +136,9 @@ class ImprovementPipeline:
         governance: GovernanceMode | str = GovernanceMode.SUPERVISED,
         recursion: RecursionPolicy | None = None,
         approver: Approver = auto_approve,
-        deliverer: Deliverer | None = None,
+        delivery_coordinator: DeliveryCoordinator | None = None,
+        # Compatibility/injection seam: any object implementing ``deliver(...)``.
+        deliverer: Any = None,
         auto_merge: bool = False,
         keep_worktree: bool = True,
     ):
@@ -134,39 +153,121 @@ class ImprovementPipeline:
         self.governance = GovernanceMode(governance)
         self.recursion = recursion or RecursionPolicy()
         self.approver = approver
-        self.deliverer = deliverer or Deliverer(client=client, governance=self.governance.value)
+        if delivery_coordinator is not None and deliverer is not None:
+            raise ValueError("pass delivery_coordinator or deliverer, not both")
+        self.delivery_coordinator = (
+            delivery_coordinator
+            or deliverer
+            or DeliveryCoordinator.from_client(
+                client=client,
+                governance=self.governance.value,
+            )
+        )
         self.auto_merge = auto_merge
         self.keep_worktree = keep_worktree
 
     @traceable(name="improve.run", run_type="chain")
     async def run(
-        self, *, intent: str, trajectory: list[dict[str, Any]] | None = None
+        self,
+        *,
+        intent: str,
+        target_trajectory: list[dict[str, Any]] | None = None,
+        trajectory: list[dict[str, Any]] | None = None,
     ) -> PipelineResult:
         """One Recursive Run: ONE worktree/branch, up to max_loops delivered loops,
         each a single commit; merge (or keep the branch) at the end."""
-        trajectory = trajectory or []
+        if target_trajectory is not None and trajectory is not None:
+            raise ValueError("pass target_trajectory, not both trajectory names")
+        # ``trajectory`` remains a compatibility alias, but internally the name is
+        # explicit so target-agent evidence cannot be confused with Reforge history.
+        target_trajectory = target_trajectory if target_trajectory is not None else trajectory
+        target_trajectory = target_trajectory or []
         # ONE worktree/branch for the whole run; loops accumulate commits on it.
         wt = WorktreeSession(self.cwd, base="HEAD", keep=True)
         await wt.__aenter__()
-        manifest = await self._preflight(wt, intent, len(trajectory))
+        try:
+            manifest = await self._preflight(wt, intent, len(target_trajectory))
+            run_record = RecursiveRunRecord(
+                run_id=manifest["run_id"],
+                intent=intent,
+                target_repo=self.cwd,
+                branch=wt.branch,
+                base_commit=wt.base_commit or "",
+                manifest=manifest,
+                target_run_refs=_target_run_refs(target_trajectory),
+            )
+            record_store = ImprovementRecordStore(self.cwd, run_record.run_id)
+            record_store.start(run_record)
+            history_index = ImprovementHistoryIndex(
+                Path(self.cwd) / ".meta-improve" / "improvement_history.db"
+            )
+            history_index.rebuild(self.cwd)
+        except Exception:
+            await wt.__aexit__(None, None, None)
+            raise
         last_success: PipelineResult | None = None
         result: PipelineResult | None = None
-        loop_history: list[str] = []  # what earlier loops tried, fed to the Orchestrator
+        loop_history: list[ReforgeLoopRecord] = []
         all_results: list[PipelineResult] = []
         try:
             for loop_i in range(self.recursion.max_loops):
-                result = await self._run_loop(wt, intent, trajectory, loop_history, loop_i)
+                loop_base = await wt.head()
+                result = await self._run_loop(
+                    wt,
+                    intent,
+                    target_trajectory,
+                    loop_history,
+                    manifest,
+                    history_index,
+                    loop_i,
+                )
                 all_results.append(result)
-                loop_history.append(_loop_note(result))
+                loop_record = _materialize_loop_record(
+                    run_record.run_id, loop_base, result
+                )
+                loop_record = record_store.append_loop(loop_record, result.diff)
+                history_index.index_loop(
+                    loop_record,
+                    self.cwd,
+                    record_path=str(
+                        record_store.loops_dir
+                        / f"loop_{loop_record.loop}"
+                        / "record.json"
+                    ),
+                )
+                loop_history.append(loop_record)
+                run_record.loop_refs.append(
+                    f"loops/loop_{loop_record.loop}/record.json"
+                )
                 delivered = result.delivery is not None and result.delivery.passed
-                # a non-delivered loop ends the run; return an earlier win if any.
+                # A non-delivered loop ends the run. Preserve an earlier verified
+                # version, but report that the recursive run only partially delivered.
                 if not delivered:
-                    return await self._finalize(wt, last_success or result, manifest, all_results)
+                    result = (
+                        _as_partial(last_success, result)
+                        if last_success is not None
+                        else result
+                    )
+                    break
                 last_success = result
                 if loop_i + 1 >= self.recursion.max_loops:
                     break
             final = last_success or result or PipelineResult("abstained")
-            return await self._finalize(wt, final, manifest, all_results)
+            if result is not None and result.stage == "partially_delivered":
+                final = result
+            finalized = await self._finalize(wt, final, manifest, all_results)
+            run_record.status = finalized.stage
+            run_record.final_commit = (
+                finalized.merged_commit
+                or (finalized.version.verified_commit if finalized.version else "")
+                or ""
+            )
+            record_store.finish(run_record)
+            return finalized
+        except Exception:
+            run_record.status = "failed"
+            record_store.finish(run_record)
+            raise
         finally:
             await wt.__aexit__(None, None, None)
 
@@ -175,7 +276,7 @@ class ImprovementPipeline:
         # a worktree is created from a COMMIT, so it excludes uncommitted changes.
         status = await _run_git("status", "--porcelain", cwd=self.cwd)
         return {
-            "run_id": datetime.now(UTC).strftime("%Y%m%d_%H%M%S"),
+            "run_id": datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f"),
             "intent": intent[:200],
             "target": self.cwd,
             "candidate_branch": wt.branch,
@@ -187,7 +288,7 @@ class ImprovementPipeline:
             "max_repairs": self.recursion.max_repairs,
             "auto_merge": self.auto_merge,
             "keep_worktree": self.keep_worktree,
-            "trajectory_records": traj,
+            "target_trajectory_records": traj,
         }
 
     @traceable(name="improve.loop", run_type="chain")
@@ -195,8 +296,10 @@ class ImprovementPipeline:
         self,
         wt: WorktreeSession,
         intent: str,
-        trajectory: list[dict[str, Any]],
-        loop_history: list[str],
+        target_trajectory: list[dict[str, Any]],
+        loop_history: list[ReforgeLoopRecord],
+        run_manifest: dict[str, Any],
+        history_index: ImprovementHistoryIndex,
         loop_i: int,
     ) -> PipelineResult:
         """One Improvement Loop on the shared worktree: analyze -> gate -> approve
@@ -206,9 +309,31 @@ class ImprovementPipeline:
         wt_path = str(wt.path)
 
         # 1. Orchestrator analyzes the current state, given what earlier loops tried.
-        orch = Orchestrator(self.client, self.registry, wt_path)
+        code_index = CodeIndex(
+            root=wt_path,
+            db_path=Path(self.cwd) / ".meta-improve" / "orchestrator_code_index.db",
+        )
+        code_index.rebuild()
+        context = OrchestratorContextBuilder(wt_path).build(
+            intent=intent,
+            target_trajectory=target_trajectory,
+            previous_reforge_loops=loop_history,
+            run_manifest=run_manifest | {"current_loop": loop_i, "loop_base": loop_base},
+        )
+        orch = Orchestrator(
+            self.client,
+            self.registry,
+            wt_path,
+            code_index=code_index,
+            history_index=history_index,
+        )
         try:
-            proposal = await orch.analyze(intent, trajectory, loop_history)
+            proposal = await orch.analyze(
+                intent,
+                target_trajectory,
+                loop_history,
+                context=context,
+            )
             # PIPELINE is the authority on DAG validity (the tool is advisory).
             proposal = await self._enforce_valid_proposal(orch, proposal)
         except ValueError as exc:
@@ -251,6 +376,16 @@ class ImprovementPipeline:
         # gate above checks intent; this gate checks what the Writer actually did.
         changed_paths = await wt.changed_since(loop_base)
         actual_gate = policy_gate.evaluate_changes(proposal, changed_paths, self.policy)
+        if actual_gate.decision == "deny":
+            result = PipelineResult(
+                stage="rejected_policy", proposal=proposal, gate=actual_gate,
+                approval=approval, frozen=frozen, outcome=outcome,
+                diff=await wt.diff_since(loop_base), loop=loop_i,
+                error="; ".join(actual_gate.reasons),
+            )
+            result.report_path = self._write_report(result)
+            await wt.reset_hard(loop_base)
+            return result
         if actual_gate.decision == "needs_human":
             if self.governance == GovernanceMode.AUTONOMOUS:
                 await wt.reset_hard(loop_base)
@@ -279,12 +414,26 @@ class ImprovementPipeline:
             and repairs < self.recursion.max_repairs
         ):
             repairs += 1
-            outcome = await writer.repair(worktree=wt, instruction=_repair_instruction(delivery))
-            if outcome.blocker is not None or not outcome.completed:
+            repair_outcome = await writer.repair(
+                worktree=wt,
+                instruction=_repair_instruction(delivery),
+            )
+            for task_outcome in repair_outcome.task_outcomes:
+                task_outcome.repair_iteration = repairs
+            outcome = _combine_execution_outcomes(outcome, repair_outcome)
+            if repair_outcome.blocker is not None or not repair_outcome.completed:
                 break
             repaired_gate = policy_gate.evaluate_changes(
                 proposal, await wt.changed_since(loop_base), self.policy
             )
+            if repaired_gate.decision == "deny":
+                delivery = Delivery(
+                    passed=False,
+                    hard_gate_ok=False,
+                    reasons=repaired_gate.reasons,
+                )
+                loop_diff = await wt.diff_since(loop_base)
+                break
             if repaired_gate.decision == "needs_human":
                 if self.governance == GovernanceMode.AUTONOMOUS:
                     delivery = Delivery(
@@ -353,7 +502,12 @@ class ImprovementPipeline:
         """End the Recursive Run: merge if asked + delivered, else keep the branch
         (so delivered commits stay reachable) or clean up if nothing was delivered."""
         delivered = result.delivery is not None and result.delivery.passed
-        if self.auto_merge and delivered and result.proposal is not None:
+        if (
+            self.auto_merge
+            and delivered
+            and result.stage == "delivered"
+            and result.proposal is not None
+        ):
             msg = f"improve: {result.proposal.summary}"
             result.merged_commit = await wt.merge_back(message=msg)
             result.stage = "merged"
@@ -380,6 +534,16 @@ class ImprovementPipeline:
             commit = (r.version.verified_commit or "")[:12] if r.version else "—"
             reasons = "; ".join(r.delivery.reasons) if r.delivery else (r.error or "")
             lines.append(f"- loop {r.loop} [{r.stage}] commit {commit} — {reasons}")
+        if final.stage == "partially_delivered":
+            lines += [
+                "",
+                "## Terminal state",
+                f"- **Last successful loop:** {final.loop}",
+                f"- **Terminal loop:** {final.terminal_loop}",
+                f"- **Terminal stage:** {final.terminal_stage}",
+            ]
+            if final.terminal_error:
+                lines.append(f"- **Terminal error:** {final.terminal_error}")
         if final.merged_commit:
             lines.append(f"\n**Merged to main:** {final.merged_commit[:12]}")
         elif final.version:
@@ -401,6 +565,11 @@ class ImprovementPipeline:
                 problems.append(f"invalid task DAG — {dag.summary()}")
             if not acceptance.valid:
                 problems.append(f"invalid acceptance contract — {acceptance.summary()}")
+            analysis_problems = _analysis_problems(proposal)
+            if analysis_problems:
+                problems.append(
+                    "incomplete orchestrator analysis — " + "; ".join(analysis_problems)
+                )
             if not problems:
                 return proposal
             if tries >= max_tries:
@@ -421,7 +590,7 @@ class ImprovementPipeline:
         """Deliver one exact candidate tree and reject verification side effects."""
         candidate_tree = await wt.snapshot()
         reviewed_diff = await wt.diff_since(loop_base)
-        delivery = await self.deliverer.deliver(
+        delivery = await self.delivery_coordinator.deliver(
             proposal, cwd=wt_path, loop_diff=reviewed_diff
         )
         delivered_tree = await wt.snapshot()
@@ -513,20 +682,238 @@ def _loop_note(result: PipelineResult) -> str:
     return note
 
 
+def _target_run_refs(records: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
+    for record in records:
+        run_id = str(record.get("run_id") or record.get("session_id") or "")
+        if run_id and run_id not in refs:
+            refs.append(run_id)
+    return refs
+
+
+def _analysis_problems(proposal: ImprovementProposal) -> list[str]:
+    """Hard-code the minimum diagnosis/selection trace; prompt compliance is not enough."""
+
+    analysis = proposal.analysis
+    problems = []
+    if not analysis.findings:
+        problems.append("at least one symptom/root-cause/capability finding is required")
+    if len(analysis.candidates) < 2:
+        problems.append("compare at least two intervention candidates")
+    names = {candidate.name for candidate in analysis.candidates}
+    if not analysis.selected_candidate:
+        problems.append("selected_candidate is required")
+    elif analysis.selected_candidate not in names:
+        problems.append("selected_candidate must name one of the candidates")
+    if not analysis.causal_mechanism.strip():
+        problems.append("causal_mechanism is required")
+    if not analysis.expected_capability_delta.strip():
+        problems.append("expected_capability_delta is required")
+    for index, finding in enumerate(analysis.findings):
+        if not finding.evidence_refs:
+            problems.append(f"finding {index} must cite evidence_refs")
+    return problems
+
+
+def _combine_execution_outcomes(
+    original: ExecutionOutcome,
+    repair: ExecutionOutcome,
+) -> ExecutionOutcome:
+    """Preserve the original task history while appending each delivery repair."""
+
+    return ExecutionOutcome(
+        completed=original.completed and repair.completed,
+        task_outcomes=[*original.task_outcomes, *repair.task_outcomes],
+        blocker=repair.blocker or original.blocker,
+        final_commit=repair.final_commit or original.final_commit,
+        diff=repair.diff or original.diff,
+    )
+
+
+def _materialize_loop_record(
+    run_id: str,
+    loop_base: str,
+    result: PipelineResult,
+) -> ReforgeLoopRecord:
+    """Create the next-loop feedback and durable Reforge audit deterministically."""
+
+    proposal = result.proposal
+    components: list[ComponentRecord] = []
+    if proposal is not None:
+        components.append(
+            ComponentRecord(
+                component="orchestrator",
+                status=proposal.decision,
+                summary=proposal.summary,
+                details={
+                    "proposal": proposal.model_dump(mode="json"),
+                    "problem_statement": proposal.problem_statement,
+                    "analysis": proposal.analysis.model_dump(mode="json"),
+                    "tasks": [task.model_dump(mode="json") for task in proposal.tasks],
+                    "evidence": [item.model_dump(mode="json") for item in proposal.evidence],
+                    "allowed_write_paths": proposal.allowed_write_paths,
+                },
+            )
+        )
+    if result.gate is not None:
+        components.append(
+            ComponentRecord(
+                component="policy",
+                status=result.gate.decision,
+                summary="; ".join(result.gate.reasons),
+                details=jsonable(result.gate),
+            )
+        )
+    if result.outcome is not None:
+        task_details = []
+        reviews = []
+        for task in result.outcome.task_outcomes:
+            task_details.append(
+                {
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "rounds": task.rounds,
+                    "phase": task.phase,
+                    "repair_iteration": task.repair_iteration,
+                    "writer_summary": task.writer_summary,
+                    "writer_report": jsonable(task.writer_report),
+                    "attempts": task.attempts,
+                    "commit": task.commit,
+                }
+            )
+            reviews.append(
+                {
+                    "task_id": task.task_id,
+                    "verdict": task.review.verdict,
+                    "summary": task.review.summary,
+                    "findings": [
+                        finding.model_dump(mode="json") for finding in task.review.findings
+                    ],
+                }
+            )
+        components.extend(
+            [
+                ComponentRecord(
+                    component="writer",
+                    status="completed" if result.outcome.completed else "incomplete",
+                    summary=f"{len(task_details)} task outcome(s)",
+                    details={"tasks": task_details, "blocker": jsonable(result.outcome.blocker)},
+                ),
+                ComponentRecord(
+                    component="reviewer",
+                    status=(
+                        "accepted"
+                        if reviews and all(item["verdict"] == "accept" for item in reviews)
+                        else "mixed"
+                    ),
+                    summary=f"{len(reviews)} task review(s)",
+                    details={"task_reviews": reviews},
+                ),
+            ]
+        )
+    if result.delivery is not None:
+        components.extend(
+            [
+                ComponentRecord(
+                    component="acceptance_runner",
+                    status="passed" if result.delivery.hard_gate_ok else "failed",
+                    summary="; ".join(result.delivery.acceptance_failures),
+                    details={
+                        "runs": jsonable(result.delivery.runs),
+                        "failures": result.delivery.acceptance_failures,
+                    },
+                ),
+                ComponentRecord(
+                    component="deliverer",
+                    status="accepted" if result.delivery.goal_accepted else "rejected",
+                    summary=result.delivery.goal_review,
+                    details={"goal_review": result.delivery.goal_review},
+                ),
+                ComponentRecord(
+                    component="delivery_coordinator",
+                    status="accepted" if result.delivery.passed else "rejected",
+                    summary="; ".join(result.delivery.reasons),
+                    details={
+                        "hard_gate_ok": result.delivery.hard_gate_ok,
+                        "goal_accepted": result.delivery.goal_accepted,
+                        "integrity_ok": result.delivery.integrity_ok,
+                        "reasons": result.delivery.reasons,
+                    },
+                ),
+            ]
+        )
+
+    diagnosis = proposal.analysis.model_dump(mode="json") if proposal else {}
+    remaining = []
+    delivered = result.delivery is not None and result.delivery.passed
+    if proposal is not None and not delivered:
+        remaining = [
+            finding.capability_gap
+            for finding in proposal.analysis.findings
+            if finding.capability_gap
+        ]
+    commit = (
+        result.version.verified_commit
+        if result.version and result.version.verified_commit
+        else ""
+    )
+    return ReforgeLoopRecord(
+        run_id=run_id,
+        loop_id=f"{run_id}/loop_{result.loop}",
+        loop=result.loop,
+        base_commit=loop_base,
+        stage=result.stage,
+        components=components,
+        proposal_summary=proposal.summary if proposal else "",
+        diagnosis=diagnosis,
+        changed_paths=_changed_paths_from_diff(result.diff),
+        commit=commit,
+        completed=delivered,
+        remaining_gaps=remaining,
+        error=result.error,
+    )
+
+
+def _changed_paths_from_diff(diff: str) -> list[str]:
+    paths: list[str] = []
+    for line in diff.splitlines():
+        if not line.startswith("+++ b/"):
+            continue
+        path = line.removeprefix("+++ b/")
+        if path != "/dev/null" and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _as_partial(success: PipelineResult, terminal: PipelineResult) -> PipelineResult:
+    """Return the last verified version without hiding the later loop failure."""
+    success.stage = "partially_delivered"
+    success.terminal_stage = terminal.stage
+    success.terminal_loop = terminal.loop
+    success.terminal_report_path = terminal.report_path
+    success.terminal_error = terminal.error or (
+        "; ".join(terminal.delivery.reasons) if terminal.delivery else ""
+    )
+    return success
+
+
 def _repair_instruction(delivery: Delivery) -> str:
     """Turn a rejected delivery into a concrete repair brief for the Writer."""
     lines = [
         "The candidate did not pass delivery. Fix the PRODUCT CODE so it does. "
-        "What was run and what the Deliverer found:",
+        "Here are the deterministic runner failures and high-level review findings:",
     ]
+    if delivery.acceptance_failures:
+        lines.append("\nDeterministic AcceptanceRunner failures:")
+        lines.extend(f"- {failure}" for failure in delivery.acceptance_failures)
     # the failing run commands + their output.
     for r in delivery.runs:
         if r.exit_code != 0:
             tail = r.output[-800:] if r.output else ""
             lines.append(f"\n$ {r.command} (exit {r.exit_code})\n{tail}")
-    # the Deliverer's checklist review (why it rejected).
-    if delivery.checklist_review:
-        lines.append(f"\nDeliverer review:\n{delivery.checklist_review}")
+    # the Deliverer's high-level proposal-vs-diff review (why it rejected).
+    if not delivery.goal_accepted and delivery.goal_review:
+        lines.append(f"\nDeliverer goal review:\n{delivery.goal_review}")
     return "\n".join(lines)
 
 
@@ -589,8 +976,8 @@ def render_report(result: PipelineResult) -> str:
         for r in result.delivery.runs:
             tail = r.output[-1500:] if r.output else ""
             lines += [f"\n`$ {r.command}` (exit {r.exit_code})", "```", tail, "```"]
-        if result.delivery.checklist_review:
-            lines += ["", "### Checklist review", result.delivery.checklist_review]
+        if result.delivery.goal_review:
+            lines += ["", "### Goal realization review", result.delivery.goal_review]
 
     if result.diff:
         diff = result.diff if len(result.diff) < 8000 else result.diff[:8000] + "\n...(truncated)"

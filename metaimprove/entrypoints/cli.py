@@ -14,7 +14,7 @@ import typer
 
 from ..agent.query import query
 from ..config import load_config
-from ..improve.trajectory import load_recent_trajectory, log_trajectory
+from ..improve.trajectory import load_recent_target_trajectory, log_target_trajectory
 from ..llm.openai_compatible import OpenAICompatibleClient
 from ..mcp.client import McpClientManager
 from ..memory.manager import MemoryManager
@@ -136,8 +136,9 @@ async def run_prompt(
         code_index=code_index,
         approval_callback=_make_approval_callback(auto_yes),
     )
-    # record this run as a trajectory so a later `improve` can use it as evidence.
-    events = log_trajectory(events, cwd=cwd)
+    # This is a TARGET AGENT trajectory. AgentReforge's own component/loop audit
+    # is stored separately by ImprovementRecordStore.
+    events = log_target_trajectory(events, cwd=cwd, task_prompt=prompt)
 
     # consume the event stream: stream text, note tool/task use, report errors.
     async for event in events:
@@ -217,13 +218,13 @@ async def run_improve(
     )
 
     # load recent agent runs as evidence for the Analyzer (empty on a fresh repo).
-    trajectory = load_recent_trajectory(cwd)
+    target_trajectory = load_recent_target_trajectory(cwd)
     typer.echo(
         f"[improve] level={level} mode={governance} cycles={cycles} "
-        f"trajectory={len(trajectory)} records analyzing: {intent}",
+        f"target_trajectory={len(target_trajectory)} records analyzing: {intent}",
         err=True,
     )
-    result = await pipeline.run(intent=intent, trajectory=trajectory)
+    result = await pipeline.run(intent=intent, target_trajectory=target_trajectory)
 
     typer.echo(f"\n[improve] stage: {result.stage}", err=True)
     if result.proposal and result.stage in ("abstained", "rejected"):
@@ -257,11 +258,24 @@ async def run_improve(
         typer.echo(f"[improve] delivery: {verdict} — {reasons}", err=True)
     if result.merged_commit:
         typer.echo(f"[improve] merged: {result.merged_commit[:12]}", err=True)
-    elif result.stage == "delivered":
+    elif result.stage in ("delivered", "partially_delivered"):
         typer.echo(
             "[improve] delivered but not merged — review the worktree/report, then merge.",
             err=True,
         )
+    if result.stage == "partially_delivered":
+        typer.echo(
+            f"[improve] partial run: loop {result.loop} delivered; "
+            f"loop {result.terminal_loop} ended as {result.terminal_stage}",
+            err=True,
+        )
+        if result.terminal_error:
+            typer.echo(f"[improve] terminal reason: {result.terminal_error[:500]}", err=True)
+        if result.terminal_report_path:
+            typer.echo(
+                f"[improve] terminal loop report: {result.terminal_report_path}",
+                err=True,
+            )
     if result.manifest:
         m = result.manifest
         typer.echo(

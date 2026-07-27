@@ -8,6 +8,7 @@ Full ReAct Loop:
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -84,9 +85,13 @@ async def query(
         # actual tool-calling execute, then feed each result back
         results = await executor.execute_all(tool_calls, context)
         for result in results:
+            call = _call_by_id(tool_calls, result.tool_use_id or "")
             yield {
                 "type": "tool_result",
                 "name": _name_by_id(tool_calls, result.tool_use_id or ""),
+                # Observable tool intent belongs in target-agent trajectories.
+                # The trajectory logger applies size limits/redaction before storage.
+                "arguments": _arguments(call),
                 "content": result.content,
                 "is_error": result.is_error,
             }
@@ -124,7 +129,18 @@ def _finalize_tool_calls(states: dict[int, dict[str, Any]]) -> list[dict[str, An
 
 
 def _name_by_id(calls: list[dict[str, Any]], tool_use_id: str) -> str:
-    for call in calls:
-        if call.get("id") == tool_use_id:
-            return str(call.get("function", {}).get("name") or "unknown")
-    return "unknown"
+    call = _call_by_id(calls, tool_use_id)
+    return str((call or {}).get("function", {}).get("name") or "unknown")
+
+
+def _call_by_id(calls: list[dict[str, Any]], tool_use_id: str) -> dict[str, Any] | None:
+    return next((call for call in calls if call.get("id") == tool_use_id), None)
+
+
+def _arguments(call: dict[str, Any] | None) -> dict[str, Any]:
+    raw = (call or {}).get("function", {}).get("arguments") or "{}"
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"_raw": str(raw)}
+    return parsed if isinstance(parsed, dict) else {"_value": parsed}

@@ -21,16 +21,61 @@ from ..llm.base import LlmClient
 from ..llm.collect import collect_text
 from ..llm.parse import parse_json_model
 from ..observability import traceable
+from ..tools.base import Tool, ToolContext, ToolResult, object_schema
 from ..tools.registry import ToolRegistry
 from ..types import Message
+from .context import OrchestratorContext, OrchestratorContextBuilder
+from .history_index import ImprovementHistoryIndex
 from .models import ImprovementProposal
 from .plan_validator import validate_plan_tool
+from .records import ReforgeLoopRecord
 
 ORCHESTRATOR_PROMPT = """You are the improvement Orchestrator: an analyst, not an implementer.
 
-Given a user's improvement intent, an execution trajectory (evidence of how the agent
-actually behaved), and READ-ONLY access to the codebase, investigate and produce an
-evidence-grounded ImprovementProposal.
+You receive two strictly separated histories:
+1. `target_agent_runs`: what the TARGET AGENT was asked to do and how it behaved.
+   Use these runs to diagnose what capability should improve.
+2. `previous_reforge_loops`: what AgentReforge itself planned, wrote, reviewed,
+   delivered, and committed earlier in THIS recursive run. Use these to avoid
+   repetition and plan the next improvement. Never treat Reforge workflow events as
+   target-agent behavior.
+
+You also receive a deterministic repository map and READ-ONLY code tools. Produce an
+evidence-grounded ImprovementProposal only after completing this workflow:
+
+PHASE 1 — ORIENT
+- State internally what the target agent was asked to do, its observable outcome,
+  the current agent architecture, and what previous Reforge loops already changed.
+- If the target task or outcome is missing, reduce confidence; do not invent it.
+- The context contains bounded summaries. Use `get_target_evidence` or
+  `get_reforge_loop` only when a cited detail needs inspection.
+
+PHASE 2 — DIAGNOSE
+- Identify 1-3 capability gaps. For each, distinguish observed symptom, likely root
+  cause, missing capability, evidence references, and uncertainty.
+- A missing action in one trajectory is not automatically a missing system feature.
+  Check the source to learn whether the failure is instruction, workflow, tool, state,
+  or architecture related.
+- Current-run facts are authoritative and already supplied directly. Use
+  `search_improvement_history` only after an initial diagnosis, to find analogous
+  OLD runs; retrieval results are supporting experience, not proof of current behavior.
+
+PHASE 3 — GENERATE CANDIDATES
+- Compare viable interventions at different leverage levels: prompt/instruction,
+  workflow/control flow, and tool/module/architecture where supported by evidence.
+- Do not default to a prompt tweak merely because it is cheap. Do not force a new
+  module when the evidence supports a smaller fix.
+- Reject changes that only patch the observed example without a reusable mechanism.
+
+PHASE 4 — SELECT
+- Rank candidates by evidence strength, cross-task capability benefit, causal clarity,
+  risk, effort, and testability.
+- Select the smallest COHERENT intervention with the highest expected capability
+  leverage. Explain the causal chain: change X -> behavior Y -> capability delta Z.
+
+PHASE 5 — PLAN
+- Only now create the task DAG, write boundary, system acceptance contract, delivery
+  checks, rollback plan, and final decision.
 
 Rules:
 - Use the read-only tools (read_file, search_code, grep, list_dir, glob) to inspect the
@@ -48,38 +93,78 @@ Rules:
   cycles, no runnable root), FIX the task graph and validate again. Only output the
   final proposal once validate_plan passes.
 - Define the approved write boundary in `allowed_write_paths`: repo-relative files,
-  directory prefixes ending in "/", or glob patterns. Keep it as narrow as possible.
+  directory prefixes ending in "/", or glob patterns. Keep authorization narrow around
+  the selected coherent solution; do not use this safety rule to bias solution selection
+  toward superficial local edits.
 - Define a traceable acceptance contract. Every task references one or more criterion
   ids; every required criterion is assigned to a task. Required criteria should use
   `verification: "command"` with a safe, concrete command. The pipeline validates this
   contract and runs the policy gate BEFORE any Writer starts.
+- `acceptance_criteria` are hard checks of the changed TARGET AGENT SYSTEM itself:
+  imports, component behavior, tool interfaces, CLI smoke, and integration consistency.
+- `delivery_run` is SYSTEM delivery input for a deterministic command hard gate: a small
+  read-only integration/smoke run proving the improved agent package starts. The Deliverer
+  LLM does not interpret its output; it separately reviews the full diff against your goal.
+  Do not grade generated-code quality here. Capability evaluation is a separate post-run
+  harness after AgentReforge has produced a candidate commit.
+- Verification commands must not leave runtime artifacts in the candidate. Prefer
+  `PYTHONDONTWRITEBYTECODE=1` for Python commands and never include `__pycache__`,
+  `*.pyc`, `.pytest_cache`, coverage output, or runtime state files in allowed_write_paths;
+  the post-write policy gate hard-denies those artifacts.
 
 When done, output ONLY the proposal as ONE JSON object in a ```json code block. Field types:
+- analysis: {
+  findings: [{symptom, root_cause, capability_gap, evidence_refs: [str], uncertainty}],
+  candidates: [{name, level: prompt|workflow|tool|module|architecture, mechanism,
+    expected_capability_delta, evidence_strength: 1-5, benefit: 1-5, risk: 1-5,
+    effort: 1-5, rejected_reason}],
+  selected_candidate, selection_reason, causal_mechanism, expected_capability_delta}
 - evidence[]: {source_type: trajectory|test|benchmark|code|log, reference: str, observation: str}
-- tasks[]: {id: str, description: str, dependencies: [str],
-  acceptance_criteria_ids: [str]} — each `description` states clearly WHAT THAT TASK
-  SHOULD DO; the Reviewer checks the task-scoped diff against it and its criteria.
+- tasks[] is the immutable contract shared by Writer and Reviewer:
+  {id: str, description: str, rationale: str, capability_change: str,
+  required_behaviors: [{id, description}],
+  implementation_constraints: [{id, description}],
+  invariants: [{id, description}],
+  prohibited_shortcuts: [{id, description}],
+  affected_components: [str], reviewer_focus: [str],
+  dependencies: [str], acceptance_criteria_ids: [str]}.
+  Use unique clause ids within each task (for example RB1, CON1, INV1, PS1).
+  `description` is the concrete objective; `capability_change` states what reusable
+  target-agent ability changes; required behaviors must be observable; constraints
+  define implementation boundaries; invariants preserve existing behavior; prohibited
+  shortcuts name plausible surface-level implementations that must not pass. The Writer
+  implements this contract and the Reviewer audits the exact same clauses.
 - acceptance_criteria[]: {id: str, description: str,
   mode: red_green|invariant|metric_improvement|non_regression|manual,
+  check_type: unit|integration|smoke,
   verification: command|review|manual, command: str, expected_exit_code: int,
   required_output_contains: [str], forbidden_output_contains: [str],
   test_level: full|focused|basic, required: bool}
 - allowed_write_paths[]: the exact approved write scope.
 - benefit/risk/effort: int 1-5; confidence: float 0-1
 - decision: proceed|abstain|needs_human
-- delivery_run[]: optional additional integration commands. Criterion commands are
-  the standard hard acceptance checks; do not duplicate them here.
-- delivery_checklist[]: str — the whole loop's integration acceptance: what the
-  Deliverer must confirm from that run's output (e.g. "add 2 3 prints 5", "bad input
-  is handled without a crash").
+- delivery_run[]: system-level integration/smoke commands for the improved agent package.
+- delivery_checklist[]: high-level system requirements the Deliverer can judge from the
+  full diff (selected mechanism is implemented and wired, scope is coherent, no obvious
+  cross-component regression). Do not require it to infer runtime facts.
 - also: summary, problem_statement, goals[], non_goals[], affected_components[],
   dependencies[], decision_reason, rollback_plan, alternatives_considered[]"""
 
 
 class Orchestrator:
-    def __init__(self, client: LlmClient, registry: ToolRegistry, cwd: str):
+    def __init__(
+        self,
+        client: LlmClient,
+        registry: ToolRegistry,
+        cwd: str,
+        *,
+        code_index: Any = None,
+        history_index: ImprovementHistoryIndex | None = None,
+    ):
         self.client = client
         self.cwd = cwd
+        self.code_index = code_index
+        self.history_index = history_index
         # analyst gets read-only tools ONLY — it must never modify code.
         self.registry = _read_only_registry(registry)
         # plus a deterministic DAG check it must run before finalizing its plan.
@@ -89,12 +174,25 @@ class Orchestrator:
     async def analyze(
         self,
         intent: str,
-        trajectory: list[dict[str, Any]],
-        loop_history: list[str] | None = None,
+        target_trajectory: list[dict[str, Any]],
+        loop_history: list[ReforgeLoopRecord] | None = None,
         max_turns: int = 12,
+        context: OrchestratorContext | None = None,
     ) -> ImprovementProposal:
+        context = context or OrchestratorContextBuilder(self.cwd).build(
+            intent=intent,
+            target_trajectory=target_trajectory,
+            previous_reforge_loops=loop_history or [],
+            run_manifest={},
+        )
+        # The initial prompt contains a bounded evidence catalog. This read-only
+        # drill-down tool exposes the full selected TARGET event by stable id.
+        self.registry.register(_evidence_tool(context))
+        self.registry.register(_reforge_loop_tool(context))
+        if self.history_index is not None:
+            self.registry.register(_history_tool(context, self.history_index))
         # 1. run the ReAct loop; collect its final text (the proposal JSON).
-        text = await self._investigate(intent, trajectory, loop_history or [], max_turns)
+        text = await self._investigate(context, max_turns)
         # 2. validate; on schema failure, do ONE self-correcting repair pass.
         try:
             return parse_json_model(text, ImprovementProposal)
@@ -118,9 +216,7 @@ class Orchestrator:
 
     async def _investigate(
         self,
-        intent: str,
-        trajectory: list[dict[str, Any]],
-        loop_history: list[str],
+        context: OrchestratorContext,
         max_turns: int,
     ) -> str:
         text = ""
@@ -128,8 +224,9 @@ class Orchestrator:
             client=self.client,
             registry=self.registry,
             system_prompt=ORCHESTRATOR_PROMPT,
-            user_message=_build_request(intent, trajectory, loop_history),
+            user_message=_build_request(context),
             cwd=self.cwd,
+            code_index=self.code_index,
             max_turns=max_turns,
         ):
             if event.get("type") == "text_delta":
@@ -159,20 +256,124 @@ def _read_only_registry(registry: ToolRegistry) -> ToolRegistry:
     return read_only
 
 
-def _build_request(
-    intent: str, trajectory: list[dict[str, Any]], loop_history: list[str]
-) -> str:
-    lines = [f"Improvement intent:\n{intent}", "", "Execution trajectory (evidence records):"]
-    if trajectory:
-        lines += [f"- {json.dumps(rec, ensure_ascii=False)}" for rec in trajectory[:100]]
-    else:
-        lines.append("- (no trajectory provided)")
-    # earlier loops in THIS run: what was tried and how it went — plan the NEXT step.
-    if loop_history:
-        lines += ["", "Previous loops in this run (plan the NEXT improvement accordingly):"]
-        lines += [f"- {h}" for h in loop_history]
-    lines.append(
-        "\nInvestigate the codebase with the read-only tools, then output the "
+def _build_request(context: OrchestratorContext) -> str:
+    """Serialize one mandatory, typed management view instead of raw mixed logs."""
+
+    return (
+        "OrchestratorContext (deterministically prepared; trajectory kinds are separate):\n"
+        f"```json\n{json.dumps(context.model_dump(mode='json'), ensure_ascii=False, indent=2)}\n"
+        "```\n\nFollow PHASES 1-5 in order. Use evidence references from the context and "
+        "inspect the real source with read-only tools. Then output the final "
         "ImprovementProposal JSON."
     )
-    return "\n".join(lines)
+
+
+def _evidence_tool(context: OrchestratorContext) -> Tool:
+    async def get_evidence(args: dict, _tool_context: ToolContext) -> ToolResult:
+        event_id = str(args.get("event_id") or "").strip()
+        if not event_id:
+            return ToolResult(content="Error: 'event_id' is required.", is_error=True)
+        record = context.raw_target_evidence.get(event_id)
+        if record is None:
+            return ToolResult(
+                content=f"Error: target-agent evidence not found: {event_id}",
+                is_error=True,
+            )
+        return ToolResult(content=json.dumps(record, ensure_ascii=False, indent=2))
+
+    return Tool(
+        name="get_target_evidence",
+        description=(
+            "Read one full TARGET AGENT trajectory event by an event_id listed in "
+            "OrchestratorContext.evidence_catalog. This never returns AgentReforge "
+            "workflow events."
+        ),
+        parameters=object_schema(
+            {
+                "event_id": {
+                    "type": "string",
+                    "description": "Stable target-agent evidence event id",
+                }
+            },
+            required=["event_id"],
+        ),
+        handler=get_evidence,
+    )
+
+
+def _history_tool(
+    context: OrchestratorContext,
+    history_index: ImprovementHistoryIndex,
+) -> Tool:
+    async def search_history(args: dict, _tool_context: ToolContext) -> ToolResult:
+        query_text = str(args.get("query") or "").strip()
+        if not query_text:
+            return ToolResult(content="Error: 'query' is required.", is_error=True)
+        matches = history_index.search(
+            query_text,
+            target_repo=context.run_manifest.get("target") or context.repository.root,
+            exclude_run_id=str(context.run_manifest.get("run_id") or ""),
+            limit=int(args.get("limit") or 5),
+        )
+        return ToolResult(
+            content=(
+                json.dumps(matches, ensure_ascii=False, indent=2)
+                if matches
+                else "No relevant historical AgentReforge loops found."
+            )
+        )
+
+    return Tool(
+        name="search_improvement_history",
+        description=(
+            "Search OLDER AgentReforge loop records for similar capability gaps, "
+            "interventions, reviewer findings, or delivery outcomes. Never use this "
+            "instead of the directly supplied current target run/current-loop facts."
+        ),
+        parameters=object_schema(
+            {
+                "query": {
+                    "type": "string",
+                    "description": "Capability gap, failure pattern, or intervention to find",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum matches (default 5, maximum 20)",
+                },
+            },
+            required=["query"],
+        ),
+        handler=search_history,
+    )
+
+
+def _reforge_loop_tool(context: OrchestratorContext) -> Tool:
+    async def get_loop(args: dict, _tool_context: ToolContext) -> ToolResult:
+        loop_id = str(args.get("loop_id") or "").strip()
+        if not loop_id:
+            return ToolResult(content="Error: 'loop_id' is required.", is_error=True)
+        record = context.raw_reforge_loops.get(loop_id)
+        if record is None:
+            return ToolResult(
+                content=f"Error: AgentReforge loop not found: {loop_id}",
+                is_error=True,
+            )
+        return ToolResult(content=record.model_dump_json(indent=2))
+
+    return Tool(
+        name="get_reforge_loop",
+        description=(
+            "Read the full component-divided record for a previous AgentReforge loop "
+            "in THIS recursive run. It is workflow audit data, not target-agent evidence."
+        ),
+        parameters=object_schema(
+            {
+                "loop_id": {
+                    "type": "string",
+                    "description": "Loop id listed in previous_reforge_loops",
+                }
+            },
+            required=["loop_id"],
+        ),
+        handler=get_loop,
+    )

@@ -32,3 +32,33 @@ def test_acceptance_contract_requires_scope_and_command():
     assert not result.valid
     assert "allowed_write_paths" in result.summary()
     assert "has no command" in result.summary()
+
+
+def test_acceptance_contract_rejects_thin_writer_reviewer_handoff():
+    proposal = make_proposal()
+    task = proposal.tasks[0]
+    task.rationale = ""
+    task.capability_change = ""
+    task.required_behaviors = []
+    task.invariants = []
+    task.reviewer_focus = []
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "has no rationale" in result.summary()
+    assert "has no capability_change" in result.summary()
+    assert "has no required_behaviors" in result.summary()
+    assert "has no invariants" in result.summary()
+    assert "has no reviewer_focus" in result.summary()
+
+
+def test_acceptance_contract_requires_unique_traceable_clause_ids():
+    proposal = make_proposal()
+    task = proposal.tasks[0]
+    task.invariants[0].id = "RB1"
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "contract clause ids must be unique" in result.summary()
