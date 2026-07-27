@@ -252,7 +252,10 @@ class Orchestrator:
             "`verified_safety_properties`, and add that exact criterion id to the owning "
             "Task's `acceptance_criteria_ids`. For an unknown Task dependency, use ONLY "
             "an exact `id` from the proposal's `tasks` list; never use a Candidate name "
-            "or description as a Task dependency."
+            "or description as a Task dependency. When a path_confinement criterion says "
+            "it must exercise traversal, its executable `command` MUST literally pass a "
+            "`..` path to the changed path-taking tool and assert the declared stable "
+            "blocked/error output marker."
         )
         text = await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT

@@ -19,6 +19,11 @@ def test_orchestrator_distinguishes_candidate_and_task_dependencies():
     assert "Never put a Candidate" in ORCHESTRATOR_PROMPT
 
 
+def test_orchestrator_requires_literal_traversal_in_safety_check():
+    assert "relative `..` escape" in ORCHESTRATOR_PROMPT
+    assert "stable blocked/error marker" in ORCHESTRATOR_PROMPT
+
+
 def test_proposal_schema_repair_can_recover_on_second_retry():
     orchestrator = Orchestrator(_UnusedClient(), ToolRegistry(), ".")
     valid = make_proposal().model_dump_json()
