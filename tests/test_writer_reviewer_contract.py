@@ -8,6 +8,10 @@ from agentreforge.improve.writer_reviewer import (
     _task_brief,
     _task_contract_text,
 )
+from agentreforge.orchestration.task_executor import (
+    _declared_affected_components,
+    _outside_declared_scope,
+)
 
 
 def test_writer_and_reviewer_share_one_traceable_task_contract():
@@ -32,6 +36,18 @@ def test_writer_prompt_forbids_inventing_paths_outside_task_scope():
     assert "Modify only the exact files listed under Affected components" in (
         WRITER_PROMPT_SUFFIX
     )
+
+
+def test_task_diff_scope_uses_actual_changed_paths_not_writer_claims():
+    brief = "Affected components: demo_agent/agent.py, tests/"
+
+    scope = _declared_affected_components(brief)
+
+    assert scope == ["demo_agent/agent.py", "tests/"]
+    assert _outside_declared_scope(
+        ["demo_agent/agent.py", "tests/test_agent.py", "README.md"],
+        scope,
+    ) == ["README.md"]
 
 
 def test_reviewer_cannot_approve_without_covering_every_contract_clause():

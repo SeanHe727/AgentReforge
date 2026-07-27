@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -231,7 +232,11 @@ class TaskExecutor:
         gate and the Writer's inline request_review tool)."""
         # deterministic structural guard first (a clobber/syntax/shrink is a hard reject).
         if config.structural_guard and config.worktree is not None:
-            findings = await self._structural_findings(config.worktree, since=task_start)
+            findings = await self._structural_findings(
+                config.worktree,
+                since=task_start,
+                declared_scope=_declared_affected_components(brief),
+            )
             if findings:
                 return ReviewResult(verdict="revise", findings=findings,
                                     summary="Structural guard rejected the edit.")
@@ -322,12 +327,31 @@ class TaskExecutor:
         return text.strip() or "(no output)", None
 
     async def _structural_findings(
-        self, worktree: WorktreeLike, since: str | None = None
+        self,
+        worktree: WorktreeLike,
+        since: str | None = None,
+        declared_scope: list[str] | None = None,
     ) -> list[Finding]:
         """Deterministic checks on changed files that signal a clobbered file.
         Scoped to files changed since `since` (this task) when given."""
         findings: list[Finding] = []
         changed = await (worktree.changed_since(since) if since else worktree.changed_paths())
+        outside = _outside_declared_scope(changed, declared_scope or [])
+        if outside:
+            findings.append(
+                Finding(
+                    severity="blocker",
+                    location=", ".join(outside),
+                    description=(
+                        "Task diff exceeds its frozen Affected components: "
+                        + ", ".join(outside)
+                    ),
+                    required_fix=(
+                        "Revert every out-of-scope file while preserving only the "
+                        "authorized task files."
+                    ),
+                )
+            )
         for rel in changed:
             if not rel.endswith(".py"):
                 continue
@@ -371,6 +395,36 @@ class TaskExecutor:
                         required_fix="Use edit_file to change only what the task needs.",
                     ))
         return findings
+
+
+def _declared_affected_components(brief: str) -> list[str]:
+    marker = "Affected components:"
+    for line in brief.splitlines():
+        if line.startswith(marker):
+            rendered = line.removeprefix(marker).strip()
+            if not rendered or rendered.startswith("("):
+                return []
+            return [item.strip() for item in rendered.split(",") if item.strip()]
+    return []
+
+
+def _outside_declared_scope(changed: list[str], scopes: list[str]) -> list[str]:
+    if not scopes:
+        return []
+    outside: list[str] = []
+    for path in changed:
+        clean = path.removeprefix("./")
+        if not any(
+            clean == scope.removeprefix("./")
+            or (
+                scope.removeprefix("./").endswith("/")
+                and clean.startswith(scope.removeprefix("./"))
+            )
+            or fnmatch(clean, scope.removeprefix("./"))
+            for scope in scopes
+        ):
+            outside.append(path)
+    return outside
 
     def _to_review(self, review: Any, *, location: str) -> ReviewResult:
         """Adapt the Reviewer's approved/feedback verdict into a ReviewResult."""

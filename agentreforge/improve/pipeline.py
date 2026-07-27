@@ -416,6 +416,7 @@ class ImprovementPipeline:
             repair_outcome = await writer.repair(
                 worktree=wt,
                 instruction=_repair_instruction(delivery),
+                allowed_write_paths=proposal.allowed_write_paths,
             )
             for task_outcome in repair_outcome.task_outcomes:
                 task_outcome.repair_iteration = repairs

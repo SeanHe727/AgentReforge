@@ -10,7 +10,7 @@ from agentreforge.improve.acceptance_runner import (
     acceptance_failures,
     dangerous_command,
 )
-from agentreforge.improve.deliverer import GoalReview, goal_review_message
+from agentreforge.improve.deliverer import Deliverer, GoalReview, goal_review_message
 from agentreforge.improve.delivery_coordinator import DeliveryCoordinator
 from agentreforge.improve.models import (
     DiagnosticFinding,
@@ -88,6 +88,32 @@ def test_goal_review_message_is_proposal_and_diff_not_command_output():
     assert "new tools are wired into the active agent loop" in message
     assert "diff --git a/coder/tools.py" in message
     assert "Run output:" not in message
+
+
+def test_deliverer_retries_an_empty_review():
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, *, system_prompt):
+            self.calls += 1
+            text = (
+                ""
+                if self.calls == 1
+                else "GOAL: ACHIEVED\nREASON: wired\nPROJECT CONCERNS: none\nVERDICT: ACCEPT"
+            )
+            yield {"type": "text_delta", "text": text}
+
+    client = Client()
+    result = asyncio.run(
+        Deliverer(client=client).review(
+            make_proposal(),
+            loop_diff="diff --git a/src/agent.py b/src/agent.py",
+        )
+    )
+
+    assert result.accepted
+    assert client.calls == 2
 
 
 def test_delivery_coordinator_requires_both_runner_and_deliverer():

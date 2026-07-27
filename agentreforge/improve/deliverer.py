@@ -72,11 +72,35 @@ class Deliverer:
         diff = loop_diff[:_DIFF_CAP]
         if len(loop_diff) > _DIFF_CAP:
             diff += "\n...(truncated)"
-        text = await collect_text(
-            self.client,
-            [Message(role="user", content=goal_review_message(proposal, diff))],
-            system_prompt=DELIVERER_PROMPT,
-        )
+        message = goal_review_message(proposal, diff)
+        text = ""
+        for attempt in range(2):
+            suffix = (
+                ""
+                if attempt == 0
+                else (
+                    "\n\nYour previous response was empty or did not contain the required "
+                    "GOAL and VERDICT lines. Return the four-line review contract now."
+                )
+            )
+            text = await collect_text(
+                self.client,
+                [Message(role="user", content=message + suffix)],
+                system_prompt=DELIVERER_PROMPT,
+            )
+            if _has_goal_review_contract(text):
+                break
+        if not _has_goal_review_contract(text):
+            return GoalReview(
+                accepted=False,
+                text=(
+                    "GOAL: NOT ACHIEVED\n"
+                    "REASON: Deliverer returned an empty or malformed review twice; "
+                    "product repair is not justified.\n"
+                    "PROJECT CONCERNS: reviewer protocol failure\n"
+                    "VERDICT: REJECT"
+                ),
+            )
         upper = text.upper()
         accepted = (
             "GOAL: ACHIEVED" in upper
@@ -85,6 +109,11 @@ class Deliverer:
             and "VERDICT: REJECT" not in upper
         )
         return GoalReview(accepted=accepted, text=text)
+
+
+def _has_goal_review_contract(text: str) -> bool:
+    upper = text.upper()
+    return "GOAL:" in upper and "VERDICT:" in upper
 
 
 def goal_review_message(proposal: ImprovementProposal, loop_diff: str) -> str:

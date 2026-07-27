@@ -192,6 +192,7 @@ class WriterReviewer:
         *,
         worktree: WorktreeSession,
         instruction: str,
+        allowed_write_paths: list[str],
         system_prompt: str | None = None,
         memory: Any = None,
         code_index: Any = None,
@@ -224,8 +225,10 @@ class WriterReviewer:
             cwd=cwd,
             config=config,
             system_prompt=system_prompt,
-            build_task_message=lambda task, pl, fb: _repair_message(instruction, fb),
-            task_brief=lambda task: _repair_brief(instruction),
+            build_task_message=lambda task, pl, fb: _repair_message(
+                instruction, allowed_write_paths, fb
+            ),
+            task_brief=lambda task: _repair_brief(instruction, allowed_write_paths),
             memory=memory,
             code_index=code_index,
         )
@@ -262,22 +265,33 @@ class WriterReviewer:
         )
 
 
-def _repair_message(instruction: str, feedback: ReviewResult | None) -> str:
+def _repair_message(
+    instruction: str,
+    allowed_write_paths: list[str],
+    feedback: ReviewResult | None,
+) -> str:
     """Build the Writer's prompt for a repair task."""
-    lines = [WRITER_PROMPT_SUFFIX.strip(), f"\n{_repair_brief(instruction)}"]
+    lines = [
+        WRITER_PROMPT_SUFFIX.strip(),
+        f"\n{_repair_brief(instruction, allowed_write_paths)}",
+    ]
     if feedback and feedback.findings:
         fb = "\n".join(f"- {f.description}" for f in feedback.findings)
         lines.append(f"\nThe Reviewer REJECTED your previous attempt. Fix these:\n{fb}")
     return "\n".join(lines)
 
 
-def _repair_brief(instruction: str) -> str:
+def _repair_brief(instruction: str, allowed_write_paths: list[str]) -> str:
     return (
         "Shared Task Contract [repair]\n"
         "Required review clause ids: REPAIR1\n"
         f"Objective: {instruction}\n"
+        "Affected components: "
+        + (", ".join(allowed_write_paths) or "(none; do not modify product files)")
+        + "\n"
         "Required behaviors:\n"
-        "- [REPAIR1] Resolve the reported delivery failure without regressing the candidate."
+        "- [REPAIR1] Resolve the reported delivery failure without regressing the candidate. "
+        "Revert any existing repair change outside Affected components before finishing."
     )
 
 
