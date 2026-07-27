@@ -69,6 +69,25 @@ AgentReforge does not modify the target's active branch during the run. It creat
 an isolated `improve/...` branch/worktree and keeps it for inspection unless
 `--merge` is explicitly requested.
 
+## Inspect an actual improvement
+
+The separate
+[AgentReforge demo agent](https://github.com/SeanHe727/AgentReforge-demo)
+keeps the original coding agent on `main` and the accepted AgentReforge output
+on `improve/agentreforge`.
+
+Review the real branch diff instead of relying on a benchmark score:
+
+```bash
+git clone https://github.com/SeanHe727/AgentReforge-demo.git
+cd AgentReforge-demo
+git diff main...improve/agentreforge
+```
+
+The comparison shows the bounded capability change, including the generated
+prompt and tool-safety changes. It is an inspectable demonstration, not a claim
+of universal coding-capability improvement.
+
 ## Reproducible mini-agent demo
 
 The tracked template under `examples/mini-agent/` is intentionally weak. Create
