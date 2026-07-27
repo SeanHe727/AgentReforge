@@ -396,6 +396,26 @@ class TaskExecutor:
                     ))
         return findings
 
+    def _to_review(self, review: Any, *, location: str) -> ReviewResult:
+        """Adapt the Reviewer's approved/feedback verdict into a ReviewResult."""
+        # an explicit approval accepts; anything else is a revise with a finding.
+        if getattr(review, "approved", False):
+            return ReviewResult(verdict="accept", summary="Reviewer approved the change.")
+        raw = getattr(review, "feedback", "") or "Rejected without specific feedback."
+        return _revise(location, raw.strip())
+
+    def _build_blocker(self, plan: ExecutionPlan, tr: TaskResult) -> ExecutionBlocker:
+        # report the blast radius; the recommendation is always request_human.
+        affected = _dependents(plan, tr.task_id)
+        return ExecutionBlocker(
+            task_id=tr.task_id,
+            review_rounds=tr.rounds,
+            unresolved_findings=tr.review.findings if tr.review else [],
+            attempted_fixes=tr.attempts,
+            affected_tasks=affected,
+            recommendation="request_human",
+        )
+
 
 def _declared_affected_components(brief: str) -> list[str]:
     marker = "Affected components:"
@@ -425,26 +445,6 @@ def _outside_declared_scope(changed: list[str], scopes: list[str]) -> list[str]:
         ):
             outside.append(path)
     return outside
-
-    def _to_review(self, review: Any, *, location: str) -> ReviewResult:
-        """Adapt the Reviewer's approved/feedback verdict into a ReviewResult."""
-        # an explicit approval accepts; anything else is a revise with a finding.
-        if getattr(review, "approved", False):
-            return ReviewResult(verdict="accept", summary="Reviewer approved the change.")
-        raw = getattr(review, "feedback", "") or "Rejected without specific feedback."
-        return _revise(location, raw.strip())
-
-    def _build_blocker(self, plan: ExecutionPlan, tr: TaskResult) -> ExecutionBlocker:
-        # report the blast radius; the recommendation is always request_human.
-        affected = _dependents(plan, tr.task_id)
-        return ExecutionBlocker(
-            task_id=tr.task_id,
-            review_rounds=tr.rounds,
-            unresolved_findings=tr.review.findings if tr.review else [],
-            attempted_fixes=tr.attempts,
-            affected_tasks=affected,
-            recommendation="request_human",
-        )
 
 
 def _render_verdict(verdict: ReviewResult) -> str:

@@ -9,6 +9,7 @@ from agentreforge.improve.writer_reviewer import (
     _task_contract_text,
 )
 from agentreforge.orchestration.task_executor import (
+    TaskExecutor,
     _declared_affected_components,
     _outside_declared_scope,
 )
@@ -48,6 +49,10 @@ def test_task_diff_scope_uses_actual_changed_paths_not_writer_claims():
         ["demo_agent/agent.py", "tests/test_agent.py", "README.md"],
         scope,
     ) == ["README.md"]
+
+
+def test_task_executor_keeps_blocker_builder_after_scope_helpers():
+    assert callable(TaskExecutor._build_blocker)
 
 
 def test_reviewer_cannot_approve_without_covering_every_contract_clause():
