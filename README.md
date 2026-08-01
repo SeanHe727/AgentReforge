@@ -16,12 +16,13 @@ rolled back.
 - Two governance modes: `autonomous` and `supervised`.
 - Recursive Runs with one branch/worktree for their full lifetime.
 - One commit per delivered Loop.
-- Bounded Improvement Batches containing one large Candidate or up to three
-  small compatible Candidates.
-- Candidate-owned Tasks with a frozen Writer/Reviewer contract.
-- Deterministic proposal, DAG, policy, write-scope, acceptance, command, and
-  delivery-integrity gates.
-- Task-level agentic review and Batch-level Delivery.
+- One coherent capability Task per Loop, with a validated single-node Task plan.
+- Typed, output-repairable Orchestrator, Reviewer, and Deliverer hand-offs;
+  Writer hands off its authoritative Git diff with only an optional text note.
+- Two minimal hard-gate families: hand-off validity and delivery/commit safety.
+- Task-level code review and Loop-level runnable Delivery with frozen usage scenarios.
+- A demo-agent runtime adapter that normalizes real target tool calls into Delivery
+  trajectory evidence.
 - Persistent run/loop/component records for audit and next-loop feedback.
 
 ## Workflow
@@ -29,15 +30,23 @@ rolled back.
 ```text
 User intent + target trajectory + current source
     -> Orchestrator diagnoses and ranks Candidates
-    -> pack one Improvement Batch
-    -> validate proposal, Task DAG, safety, and acceptance contract
-    -> policy gate / optional human approval
-    -> Writer implements each Task
-    -> Reviewer checks each frozen Task contract
-    -> DeliveryCoordinator runs deterministic checks and reviews the full diff
-    -> verify the candidate Git tree is unchanged
+    -> exclude completed achievements and Delivery-only reward hacks
+    -> select one unsolved Candidate and create one bounded Task
+    -> validate proposal schema, IDs, references, and the Task plan
+    -> optional human approval
+    -> Writer implements the Task
+    -> Reviewer returns typed blocking/non-blocking findings
+    -> malformed hand-offs are rewritten by their producing output module
+    -> Deliverer Runner executes frozen smoke/safety commands and target-agent scenarios
+    -> capture scenario output, generated artifacts, and target trajectory when required
+    -> Delivery Judge assesses actual run evidence against the Loop goal
+    -> only observed implementation defects may return to Writer for repair
+    -> verification/plan/environment failures end the Loop and inform the next one
+    -> reject repeated Candidate + verification strategies via the Negative-Attempt Ledger
+    -> verify the candidate and committed Git trees match the verified tree
     -> one Loop commit
-    -> feed LoopOutcome to the next Loop, or converge
+    -> feed LoopOutcome and delivered Scenario trajectory to the next Loop
+    -> distinguish current-commit evidence from stale baseline evidence, or converge
 ```
 
 Terminology and detailed invariants are documented in
@@ -90,7 +99,9 @@ of universal coding-capability improvement.
 ```text
 agentreforge/agent/          ordinary ReAct/plan execution components
 agentreforge/improve/        AgentReforge recursive improvement workflow
+                            including target adapters and system-owned safety probes
 agentreforge/orchestration/  shared Task executor
+                            and output-only handoff repair
 agentreforge/tools/          local tool contracts and execution
 agentreforge/policy/         command/path safety
 agentreforge/rag/            local code index

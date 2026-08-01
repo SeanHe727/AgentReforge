@@ -1,15 +1,25 @@
-"""Deterministic execution of the frozen target-system acceptance contract."""
+"""Deterministic delivery/commit gate for the frozen acceptance contract."""
 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
+import shlex
+import shutil
+import sys
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from .models import ImprovementProposal
+from .models import DeliveryScenario, ImprovementProposal
 
 _OUTPUT_CAP = 4000
+_ARTIFACT_CAP = 1000
+_MAX_ARTIFACTS = 20
+_MAX_TRAJECTORY_EVENTS = 100
 
 # A delivery command should verify the target, never mutate external state.
 _DANGEROUS = [
@@ -34,11 +44,27 @@ class RunResult:
 
 
 @dataclass
+class ScenarioRunResult:
+    scenario_id: str
+    prompt: str
+    command: list[str]
+    exit_code: int | None
+    output: str
+    changed_files: list[str] = field(default_factory=list)
+    artifacts: dict[str, str] = field(default_factory=dict)
+    trajectory: list[dict] = field(default_factory=list)
+    trajectory_available: bool = False
+    environment_ready: bool = True
+    environment_facts: list[dict[str, object]] = field(default_factory=list)
+
+
+@dataclass
 class AcceptanceRun:
-    """Facts from executing the frozen command contract; no LLM judgement."""
+    """Authoritative Runner facts supplied to the Delivery Judge and commit gate."""
 
     passed: bool
     runs: list[RunResult] = field(default_factory=list)
+    scenario_runs: list[ScenarioRunResult] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
 
@@ -56,21 +82,45 @@ class AcceptanceRunner:
 
     async def run(self, proposal: ImprovementProposal, *, cwd: str) -> AcceptanceRun:
         commands = list(proposal.delivery_run)
-        commands.extend(
-            criterion.command
-            for criterion in proposal.acceptance_criteria
-            if criterion.verification == "command" and criterion.command.strip()
-        )
         commands = list(dict.fromkeys(commands))
-        if not commands:
+        safety_properties = _required_safety_properties(proposal)
+        if not commands and not proposal.delivery_scenarios and not safety_properties:
             return AcceptanceRun(
                 passed=False,
                 failures=["no executable acceptance command defined"],
             )
 
         runs = [await self._safe_run(command, cwd) for command in commands]
+        if "path_confinement" in safety_properties:
+            runs.append(await self._run_path_confinement_probe(cwd))
+        scenario_runs = [
+            await self._safe_run_scenario(scenario, cwd)
+            for scenario in proposal.delivery_scenarios
+        ]
         failures = acceptance_failures(proposal, runs)
-        return AcceptanceRun(passed=not failures, runs=runs, failures=failures)
+        failures.extend(
+            f"delivery scenario {run.scenario_id!r}: environment conditions "
+            f"could not be materialized ({json.dumps(run.environment_facts)})"
+            for run in scenario_runs
+            if not run.environment_ready
+        )
+        failures.extend(
+            f"delivery scenario {run.scenario_id!r}: exit {run.exit_code}, expected 0"
+            for run in scenario_runs
+            if run.environment_ready and run.exit_code != 0
+        )
+        failures.extend(
+            f"system safety probe {run.command!r}: exit {run.exit_code}, expected 0"
+            for run in runs
+            if run.command.startswith("adapter:safety:")
+            and run.exit_code != 0
+        )
+        return AcceptanceRun(
+            passed=not failures,
+            runs=runs,
+            scenario_runs=scenario_runs,
+            failures=failures,
+        )
 
     async def _safe_run(self, command: str, cwd: str) -> RunResult:
         danger = dangerous_command(command)
@@ -107,6 +157,173 @@ class AcceptanceRunner:
             text = text[:_OUTPUT_CAP] + "\n...(truncated)"
         return RunResult(command, process.returncode, text)
 
+    async def _safe_run_scenario(
+        self,
+        scenario: DeliveryScenario,
+        cwd: str,
+    ) -> ScenarioRunResult:
+        rendered_for_policy = shlex.join(scenario.command)
+        danger = dangerous_command(rendered_for_policy)
+        if danger is not None:
+            if self.governance == "supervised" and self.approve_command is not None:
+                if not await self.approve_command(rendered_for_policy):
+                    return _blocked_scenario(scenario, f"human declined: {danger}")
+            else:
+                return _blocked_scenario(scenario, f"dangerous command denied: {danger}")
+        return await self._run_scenario(scenario, cwd)
+
+    async def _run_scenario(
+        self,
+        scenario: DeliveryScenario,
+        cwd: str,
+    ) -> ScenarioRunResult:
+        with tempfile.TemporaryDirectory(prefix="agentreforge-delivery-") as temp:
+            scenario_root = Path(temp).resolve()
+            workspace = scenario_root / "workspace"
+            workspace.mkdir()
+            initial = _write_fixture(workspace, scenario.fixture_files)
+            trajectory_path = workspace / ".agentreforge_trajectory.jsonl"
+            argv = [
+                arg.replace("{prompt}", scenario.prompt).replace(
+                    "{workspace}", str(workspace)
+                )
+                for arg in scenario.command
+            ]
+            env = os.environ.copy()
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["AGENTREFORGE_TRAJECTORY_PATH"] = str(trajectory_path)
+            environment_ready, environment_facts = _materialize_scenario_environment(
+                scenario,
+                env,
+                scenario_root / "path",
+            )
+            if not environment_ready:
+                return ScenarioRunResult(
+                    scenario_id=scenario.id,
+                    prompt=scenario.prompt,
+                    command=argv,
+                    exit_code=None,
+                    output="scenario environment conditions could not be materialized",
+                    environment_ready=False,
+                    environment_facts=environment_facts,
+                )
+            process_argv = argv
+            if _is_demo_agent_target(Path(cwd), argv):
+                process_argv = [
+                    sys.executable,
+                    "-m",
+                    "agentreforge.improve.demo_agent_adapter",
+                    "--target",
+                    str(Path(cwd).resolve()),
+                    "--workspace",
+                    str(workspace),
+                    "--prompt",
+                    scenario.prompt,
+                    "--trajectory",
+                    str(trajectory_path),
+                ]
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *process_argv,
+                    cwd=cwd,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                try:
+                    output, _ = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=self.timeout_s,
+                    )
+                    exit_code = process.returncode
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    output = f"timed out after {self.timeout_s}s".encode()
+                    exit_code = None
+            except Exception as exc:  # noqa: BLE001 - preserve execution evidence
+                output = f"failed to run: {exc}".encode()
+                exit_code = None
+
+            text = output.decode("utf-8", errors="replace")
+            if len(text) > _OUTPUT_CAP:
+                text = text[:_OUTPUT_CAP] + "\n...(truncated)"
+            changed_files, artifacts = _collect_artifacts(
+                workspace,
+                initial,
+                ignored={trajectory_path},
+            )
+            trajectory = _load_scenario_trajectory(trajectory_path)
+            return ScenarioRunResult(
+                scenario_id=scenario.id,
+                prompt=scenario.prompt,
+                command=argv,
+                exit_code=exit_code,
+                output=text,
+                changed_files=changed_files,
+                artifacts=artifacts,
+                trajectory=trajectory,
+                trajectory_available=bool(trajectory),
+                environment_ready=True,
+                environment_facts=environment_facts,
+            )
+
+    async def _run_path_confinement_probe(self, cwd: str) -> RunResult:
+        target = Path(cwd).resolve()
+        label = "adapter:safety:path_confinement"
+        if not _has_demo_agent_adapter(target):
+            return RunResult(
+                label,
+                None,
+                "no target adapter can verify path_confinement",
+            )
+        with tempfile.TemporaryDirectory(prefix="agentreforge-safety-") as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            sentinel = "AGENTREFORGE_OUTSIDE_SENTINEL"
+            outside = root / "outside.txt"
+            outside.write_text(sentinel, encoding="utf-8")
+            env = os.environ.copy()
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            argv = [
+                sys.executable,
+                "-m",
+                "agentreforge.improve.demo_agent_adapter",
+                "--target",
+                str(target),
+                "--workspace",
+                str(workspace),
+                "--probe-path-confinement",
+                "--outside-path",
+                "../outside.txt",
+                "--sentinel",
+                sentinel,
+            ]
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=cwd,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                output, _ = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=self.timeout_s,
+                )
+                return RunResult(
+                    label,
+                    process.returncode,
+                    output.decode("utf-8", errors="replace")[:_OUTPUT_CAP],
+                )
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                return RunResult(label, None, f"timed out after {self.timeout_s}s")
+            except Exception as exc:  # noqa: BLE001
+                return RunResult(label, None, f"failed to run: {exc}")
+
 
 def dangerous_command(command: str) -> str | None:
     for pattern in _DANGEROUS:
@@ -115,31 +332,175 @@ def dangerous_command(command: str) -> str | None:
     return None
 
 
+def _has_demo_agent_adapter(target: Path) -> bool:
+    return (target / "demo_agent" / "agent.py").is_file()
+
+
+def _is_demo_agent_target(target: Path, argv: list[str]) -> bool:
+    return _has_demo_agent_adapter(target) and any(
+        left == "-m" and right == "demo_agent"
+        for left, right in zip(argv, argv[1:], strict=False)
+    )
+
+
+def _required_safety_properties(proposal: ImprovementProposal) -> set[str]:
+    return {
+        str(safety)
+        for task in proposal.tasks
+        for safety in task.required_safety_properties
+    } | {
+        str(safety)
+        for criterion in proposal.acceptance_criteria
+        for safety in criterion.verified_safety_properties
+    }
+
+
+def _blocked_scenario(
+    scenario: DeliveryScenario,
+    reason: str,
+) -> ScenarioRunResult:
+    return ScenarioRunResult(
+        scenario_id=scenario.id,
+        prompt=scenario.prompt,
+        command=scenario.command,
+        exit_code=None,
+        output=f"blocked ({reason})",
+    )
+
+
+def _materialize_scenario_environment(
+    scenario: DeliveryScenario,
+    env: dict[str, str],
+    mirror_root: Path,
+) -> tuple[bool, list[dict[str, object]]]:
+    """Build a PATH that satisfies the Orchestrator's typed executable contract."""
+
+    desired = {item.name: item.state for item in scenario.executable_conditions}
+    unavailable = {
+        name for name, state in desired.items() if state == "unavailable"
+    }
+    original_path = env.get("PATH", os.defpath)
+    if unavailable:
+        env["PATH"] = _path_without_executables(
+            original_path,
+            unavailable,
+            mirror_root,
+        )
+
+    facts: list[dict[str, object]] = []
+    ready = True
+    for name, state in desired.items():
+        resolved = shutil.which(name, path=env["PATH"])
+        observed = "available" if resolved else "unavailable"
+        satisfied = observed == state
+        ready = ready and satisfied
+        facts.append(
+            {
+                "name": name,
+                "required_state": state,
+                "observed_state": observed,
+                "resolved_path": resolved or "",
+                "satisfied": satisfied,
+            }
+        )
+    return ready, facts
+
+
+def _path_without_executables(
+    original_path: str,
+    unavailable: set[str],
+    mirror_root: Path,
+) -> str:
+    """Mirror only PATH directories containing a blocked executable."""
+
+    result: list[str] = []
+    mirror_root.mkdir(parents=True, exist_ok=True)
+    for index, raw_directory in enumerate(original_path.split(os.pathsep)):
+        directory = Path(raw_directory or ".").resolve()
+        if not directory.is_dir():
+            continue
+        contains_blocked = any(
+            (directory / name).exists() for name in unavailable
+        )
+        if not contains_blocked:
+            result.append(str(directory))
+            continue
+        mirror = mirror_root / str(index)
+        mirror.mkdir()
+        for entry in directory.iterdir():
+            if entry.name in unavailable:
+                continue
+            try:
+                if entry.is_file() and os.access(entry, os.X_OK):
+                    (mirror / entry.name).symlink_to(entry)
+            except OSError:
+                continue
+        result.append(str(mirror))
+    return os.pathsep.join(result)
+
+
+def _write_fixture(workspace: Path, fixture_files: dict[str, str]) -> dict[str, str]:
+    initial: dict[str, str] = {}
+    for rel_path, content in fixture_files.items():
+        target = (workspace / rel_path).resolve()
+        if target != workspace and workspace not in target.parents:
+            raise ValueError(f"fixture path escapes workspace: {rel_path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        initial[rel_path] = content
+    return initial
+
+
+def _collect_artifacts(
+    workspace: Path,
+    initial: dict[str, str],
+    *,
+    ignored: set[Path],
+) -> tuple[list[str], dict[str, str]]:
+    current: dict[str, str] = {}
+    for path in sorted(workspace.rglob("*")):
+        if not path.is_file() or path.resolve() in ignored:
+            continue
+        rel = str(path.relative_to(workspace))
+        try:
+            current[rel] = path.read_text(encoding="utf-8")[:_ARTIFACT_CAP]
+        except (OSError, UnicodeDecodeError):
+            current[rel] = "(binary or unreadable)"
+    changed = sorted(
+        path
+        for path in set(initial) | set(current)
+        if initial.get(path) != current.get(path)
+    )
+    artifacts = {
+        path: current.get(path, "(deleted)")
+        for path in changed[:_MAX_ARTIFACTS]
+    }
+    return changed, artifacts
+
+
+def _load_scenario_trajectory(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    events: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if len(events) >= _MAX_TRAJECTORY_EVENTS:
+            break
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events
+
+
 def acceptance_failures(
     proposal: ImprovementProposal,
     runs: list[RunResult],
 ) -> list[str]:
-    by_command = {run.command: run for run in runs}
     failures = [
         f"delivery command {run.command!r}: exit {run.exit_code}, expected 0"
         for run in runs
         if run.command in proposal.delivery_run and run.exit_code != 0
     ]
-    for criterion in proposal.acceptance_criteria:
-        if not criterion.required or criterion.verification != "command":
-            continue
-        run = by_command.get(criterion.command)
-        if run is None:
-            failures.append(f"{criterion.id}: command was not run")
-            continue
-        if run.exit_code != criterion.expected_exit_code:
-            failures.append(
-                f"{criterion.id}: exit {run.exit_code}, expected {criterion.expected_exit_code}"
-            )
-        for expected in criterion.required_output_contains:
-            if expected not in run.output:
-                failures.append(f"{criterion.id}: output missing {expected!r}")
-        for forbidden in criterion.forbidden_output_contains:
-            if forbidden in run.output:
-                failures.append(f"{criterion.id}: output contains forbidden {forbidden!r}")
     return failures

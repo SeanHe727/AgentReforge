@@ -1,0 +1,165 @@
+"""Subprocess adapter for the AgentReforge demo target.
+
+This module runs in a fresh interpreter so it observes the candidate worktree's
+``demo_agent`` package rather than AgentReforge's process state. It converts the
+demo agent's internal tool calls into the normalized JSONL trajectory contract.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+_CONTENT_CAP = 2_000
+_ARGUMENT_CAP = 2_000
+_SENSITIVE_KEYS = {"api_key", "authorization", "password", "secret", "token"}
+
+
+def _write_event(path: Path, event: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def _safe_arguments(value: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        if any(secret in str(key).casefold() for secret in _SENSITIVE_KEYS):
+            safe[str(key)] = "[REDACTED]"
+            continue
+        text = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+        safe[str(key)] = text[:_ARGUMENT_CAP]
+    return safe
+
+
+def _load_agent(target: Path):
+    sys.path.insert(0, str(target))
+    from demo_agent import agent  # noqa: PLC0415
+
+    return agent
+
+
+def run_scenario(
+    *,
+    target: Path,
+    workspace: Path,
+    prompt: str,
+    trajectory_path: Path,
+) -> int:
+    agent = _load_agent(target)
+    original_execute = agent.execute
+    sequence = 0
+
+    def observed_execute(name: str, arguments: dict, cwd: str) -> str:
+        nonlocal sequence
+        sequence += 1
+        try:
+            result = original_execute(name, arguments, cwd)
+        except Exception as exc:
+            _write_event(
+                trajectory_path,
+                {
+                    "type": "tool_result",
+                    "sequence": sequence,
+                    "name": name,
+                    "arguments": _safe_arguments(arguments),
+                    "is_error": True,
+                    "content": f"{type(exc).__name__}: {exc}"[:_CONTENT_CAP],
+                },
+            )
+            raise
+        _write_event(
+            trajectory_path,
+            {
+                "type": "tool_result",
+                "sequence": sequence,
+                "name": name,
+                "arguments": _safe_arguments(arguments),
+                "is_error": result.startswith("error:"),
+                "content": result[:_CONTENT_CAP],
+            },
+        )
+        return result
+
+    agent.execute = observed_execute
+    try:
+        final = agent.run_task(prompt, str(workspace))
+    except Exception as exc:
+        _write_event(
+            trajectory_path,
+            {
+                "type": "error",
+                "sequence": sequence + 1,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        raise
+    finally:
+        agent.execute = original_execute
+    _write_event(
+        trajectory_path,
+        {
+            "type": "done",
+            "sequence": sequence + 1,
+            "outcome": "completed",
+            "final_response": final,
+        },
+    )
+    print(final)
+    return 0
+
+
+def probe_path_confinement(
+    *,
+    target: Path,
+    workspace: Path,
+    outside_path: str,
+    sentinel: str,
+) -> int:
+    agent = _load_agent(target)
+    result = agent.execute("read_file", {"path": outside_path}, str(workspace))
+    if sentinel in result:
+        print("unsafe: traversal exposed the outside sentinel")
+        return 1
+    if result.startswith("error:"):
+        print(f"safe: traversal blocked ({result})")
+        return 0
+    print(f"unsafe: traversal did not produce a blocking error ({result[:200]})")
+    return 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target", type=Path, required=True)
+    parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--prompt")
+    parser.add_argument("--trajectory", type=Path)
+    parser.add_argument("--probe-path-confinement", action="store_true")
+    parser.add_argument("--outside-path")
+    parser.add_argument("--sentinel")
+    args = parser.parse_args()
+
+    if args.probe_path_confinement:
+        if not args.outside_path or not args.sentinel:
+            parser.error("path-confinement probe requires outside-path and sentinel")
+        return probe_path_confinement(
+            target=args.target.resolve(),
+            workspace=args.workspace.resolve(),
+            outside_path=args.outside_path,
+            sentinel=args.sentinel,
+        )
+    if args.prompt is None or args.trajectory is None:
+        parser.error("scenario run requires prompt and trajectory")
+    return run_scenario(
+        target=args.target.resolve(),
+        workspace=args.workspace.resolve(),
+        prompt=args.prompt,
+        trajectory_path=args.trajectory.resolve(),
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

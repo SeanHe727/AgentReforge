@@ -11,17 +11,17 @@ def test_prewrite_gate_proceeds_for_grounded_executable_contract():
     assert decision.decision == "proceed"
 
 
-def test_prewrite_gate_escalates_non_executable_required_criterion():
+def test_acceptance_detail_is_not_a_policy_gate():
     proposal = make_proposal()
     proposal.acceptance_criteria[0].verification = "manual"
     proposal.acceptance_criteria[0].command = ""
 
     decision = evaluate(proposal)
 
-    assert decision.decision == "needs_human"
+    assert decision.decision == "proceed"
 
 
-def test_prewrite_gate_conservatively_detects_protected_glob():
+def test_suggested_scope_is_not_a_policy_gate():
     proposal = make_proposal(
         allowed_write_paths=["agentreforge/**/*.py"],
         affected_components=["agentreforge"],
@@ -29,18 +29,16 @@ def test_prewrite_gate_conservatively_detects_protected_glob():
 
     decision = evaluate(proposal)
 
-    assert decision.decision == "needs_human"
-    assert "protected paths" in decision.reasons[0]
+    assert decision.decision == "proceed"
 
 
-def test_postwrite_gate_rejects_out_of_scope_actual_path():
+def test_postwrite_gate_allows_changes_anywhere_inside_the_worktree():
     decision = evaluate_changes(
         make_proposal(),
         ["src/agent.py", "unexpected/generated.py"],
     )
 
-    assert decision.decision == "needs_human"
-    assert "unexpected/generated.py" in decision.reasons[0]
+    assert decision.decision == "proceed"
 
 
 def test_postwrite_gate_accepts_directory_prefix_scope():

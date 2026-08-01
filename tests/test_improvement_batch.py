@@ -53,7 +53,7 @@ def _analysis(*, selected: list[str], efforts: tuple[int, int] = (2, 2)):
     )
 
 
-def test_small_independent_candidates_can_share_one_improvement_batch():
+def test_loop_rejects_multiple_candidates_and_tasks():
     proposal = make_proposal(
         analysis=_analysis(selected=["navigation tools", "concise tool guidance"])
     )
@@ -69,34 +69,52 @@ def test_small_independent_candidates_can_share_one_improvement_batch():
         )
     )
 
-    assert _analysis_problems(proposal) == []
+    problems = _analysis_problems(proposal)
+
+    assert "a proceeding Loop must select exactly one Candidate" in problems
+    assert "a Loop must contain exactly one implementation Task" in problems
 
 
-def test_large_candidate_cannot_be_packed_with_another_candidate():
+def test_candidate_effort_is_advisory_not_a_schema_gate():
     proposal = make_proposal(
         analysis=_analysis(
-            selected=["navigation tools", "concise tool guidance"],
-            efforts=(3, 2),
+            selected=["navigation tools"],
+            efforts=(5, 2),
         )
     )
     proposal.tasks[0].candidate = "navigation tools"
-    proposal.tasks.append(
-        proposal.tasks[0].model_copy(
-            update={"id": "prompt", "candidate": "concise tool guidance"}
-        )
-    )
 
-    assert any("only small Candidates" in item for item in _analysis_problems(proposal))
+    assert _analysis_problems(proposal) == []
 
 
-def test_every_task_and_selected_candidate_has_explicit_ownership():
+def test_task_candidate_reference_must_exist_when_provided():
     proposal = make_proposal(analysis=_analysis(selected=["navigation tools"]))
     proposal.tasks[0].candidate = "unselected candidate"
 
     problems = _analysis_problems(proposal)
 
     assert any("every Task must name" in item for item in problems)
-    assert any("must own at least one Task" in item for item in problems)
+
+
+def test_single_task_must_name_its_selected_candidate():
+    proposal = make_proposal(analysis=_analysis(selected=["navigation tools"]))
+    proposal.tasks[0].candidate = ""
+
+    assert any(
+        "every Task must name" in item for item in _analysis_problems(proposal)
+    )
+
+
+def test_abstention_does_not_require_an_invented_candidate_or_task():
+    proposal = make_proposal(
+        decision="abstain",
+        analysis=OrchestratorAnalysis(),
+        tasks=[],
+        acceptance_criteria=[],
+        delivery_run=[],
+    )
+
+    assert _analysis_problems(proposal) == []
 
 
 def test_old_singular_candidate_json_is_migrated():

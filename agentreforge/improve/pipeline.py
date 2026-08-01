@@ -10,7 +10,7 @@ It sequences the reliability-first flow end to end (design doc section 11):
       -> Worktree (isolation)    : an isolated branch off a pinned base commit
          -> freeze proposal      : hash + approval stamp
          -> Writer + Reviewer    : bounded per-task implementation loop
-         -> Deliverer            : run the candidate once, hard-gate + checklist review
+         -> Deliverer            : run the candidate once, delivery gate + goal review
          -> repair loop          : a rejected delivery feeds back to the Writer
          -> report to a file     : human-readable markdown
          -> merge back OR keep   : default keeps the worktree for a human to merge
@@ -22,6 +22,7 @@ deliverer) so it stays testable and the policy stays out of the mechanism.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -181,12 +182,16 @@ class ImprovementPipeline:
         # ``trajectory`` remains a compatibility alias, but internally the name is
         # explicit so target-agent evidence cannot be confused with Reforge history.
         target_trajectory = target_trajectory if target_trajectory is not None else trajectory
-        target_trajectory = target_trajectory or []
+        target_trajectory = list(target_trajectory or [])
         # ONE worktree/branch for the whole run; loops accumulate commits on it.
         wt = WorktreeSession(self.cwd, base="HEAD", keep=True)
         await wt.__aenter__()
         try:
             manifest = await self._preflight(wt, intent, len(target_trajectory))
+            target_trajectory = _tag_baseline_trajectory(
+                target_trajectory,
+                commit=wt.base_commit or "",
+            )
             run_record = RecursiveRunRecord(
                 run_id=manifest["run_id"],
                 intent=intent,
@@ -240,16 +245,38 @@ class ImprovementPipeline:
                     f"loops/loop_{loop_record.loop}/record.json"
                 )
                 delivered = result.delivery is not None and result.delivery.passed
-                # A non-delivered loop ends the run. Preserve an earlier verified
-                # version, but report that the recursive run only partially delivered.
-                if not delivered:
-                    if last_success is not None and result.stage == "abstained":
+                if delivered:
+                    last_success = result
+                    fresh_trajectory = _delivered_target_trajectory(
+                        run_record.run_id,
+                        result,
+                    )
+                    target_trajectory.extend(fresh_trajectory)
+                    for ref in _target_run_refs(fresh_trajectory):
+                        if ref not in run_record.target_run_refs:
+                            run_record.target_run_refs.append(ref)
+                elif result.stage == "abstained":
+                    # Abstention is intentional convergence, not a failed hand-off.
+                    if last_success is not None:
                         result = _as_converged(last_success, result)
-                    elif last_success is not None:
+                    break
+                elif result.stage == "rejected":
+                    # An explicit human rejection is authority to stop this run.
+                    if last_success is not None:
                         result = _as_partial(last_success, result)
                     break
-                last_success = result
-                if loop_i + 1 >= self.recursion.max_loops:
+                elif _has_next_loop(loop_i, self.recursion.max_loops):
+                    # A failed hand-off or delivery/commit gate rejects THIS candidate,
+                    # not the recursive run. The materialized LoopOutcome above is fed
+                    # to the next Orchestrator, and _run_loop has already rolled back
+                    # any uncommitted candidate changes.
+                    continue
+                elif last_success is not None:
+                    # Recovery budget exhausted after at least one verified version.
+                    result = _as_partial(last_success, result)
+                    break
+
+                if not _has_next_loop(loop_i, self.recursion.max_loops):
                     break
             final = last_success or result or PipelineResult("abstained")
             if result is not None and result.stage in {"partially_delivered", "converged"}:
@@ -334,7 +361,11 @@ class ImprovementPipeline:
                 context=context,
             )
             # PIPELINE is the authority on DAG validity (the tool is advisory).
-            proposal = await self._enforce_valid_proposal(orch, proposal)
+            proposal = await self._enforce_valid_proposal(
+                orch,
+                proposal,
+                loop_history=loop_history,
+            )
         except ValueError as exc:
             return PipelineResult(stage="failed", loop=loop_i, error=str(exc))
 
@@ -407,10 +438,10 @@ class ImprovementPipeline:
             proposal, wt, loop_base, wt_path
         )
         repairs = 0
-        while (
-            not delivery.passed
-            and delivery.integrity_ok
-            and repairs < self.recursion.max_repairs
+        while _delivery_is_writer_repairable(
+            delivery,
+            repairs=repairs,
+            max_repairs=self.recursion.max_repairs,
         ):
             repairs += 1
             repair_outcome = await writer.repair(
@@ -429,7 +460,7 @@ class ImprovementPipeline:
             if repaired_gate.decision == "deny":
                 delivery = Delivery(
                     passed=False,
-                    hard_gate_ok=False,
+                    delivery_gate_ok=False,
                     reasons=repaired_gate.reasons,
                 )
                 loop_diff = await wt.diff_since(loop_base)
@@ -438,7 +469,7 @@ class ImprovementPipeline:
                 if self.governance == GovernanceMode.AUTONOMOUS:
                     delivery = Delivery(
                         passed=False,
-                        hard_gate_ok=False,
+                        delivery_gate_ok=False,
                         reasons=repaired_gate.reasons,
                     )
                     loop_diff = await wt.diff_since(loop_base)
@@ -447,7 +478,7 @@ class ImprovementPipeline:
                 if not repair_approval.approved:
                     delivery = Delivery(
                         passed=False,
-                        hard_gate_ok=False,
+                        delivery_gate_ok=False,
                         reasons=["repair scope was not approved", *repaired_gate.reasons],
                     )
                     loop_diff = await wt.diff_since(loop_base)
@@ -533,7 +564,33 @@ class ImprovementPipeline:
         for r in all_results:
             commit = (r.version.verified_commit or "")[:12] if r.version else "—"
             reasons = "; ".join(r.delivery.reasons) if r.delivery else (r.error or "")
-            lines.append(f"- loop {r.loop} [{r.stage}] commit {commit} — {reasons}")
+            lines += [
+                "",
+                f"### Loop {r.loop} — {r.stage}",
+                f"- **Objective:** {r.proposal.summary if r.proposal else '(none)'}",
+                f"- **Commit:** {commit}",
+                f"- **Result:** {reasons or r.stage}",
+            ]
+            changed_files = _changed_files_from_diff(r.diff)
+            lines.append(
+                "- **Changed files:** "
+                + (", ".join(f"`{path}`" for path in changed_files) or "(none)")
+            )
+            if r.outcome and r.outcome.task_outcomes:
+                lines.append("- **Tasks:**")
+                task_specs = {
+                    task.id: task
+                    for task in (r.proposal.tasks if r.proposal else [])
+                }
+                for outcome in r.outcome.task_outcomes:
+                    spec = task_specs.get(outcome.task_id)
+                    description = spec.description if spec else outcome.writer_summary
+                    description = " ".join(description.split())
+                    if len(description) > 240:
+                        description = description[:237] + "..."
+                    lines.append(
+                        f"  - `{outcome.task_id}` [{outcome.status}]: {description}"
+                    )
         if final.stage == "partially_delivered":
             lines += [
                 "",
@@ -562,9 +619,18 @@ class ImprovementPipeline:
         return str(path)
 
     async def _enforce_valid_proposal(
-        self, orch: Orchestrator, proposal: ImprovementProposal, max_tries: int = 3
+        self,
+        orch: Orchestrator,
+        proposal: ImprovementProposal,
+        *,
+        loop_history: list[ReforgeLoopRecord] | None = None,
+        max_tries: int = 3,
     ) -> ImprovementProposal:
         """Hard-validate both the task graph and the executable acceptance contract."""
+        # Abstention is a valid terminal decision, not an implementation plan. Requiring
+        # a dummy Task or delivery command would encourage the model to invent work.
+        if proposal.decision == "abstain":
+            return proposal
         tries = 0
         while tries <= max_tries:
             dag = validate_plan([t.model_dump() for t in proposal.tasks])
@@ -578,6 +644,14 @@ class ImprovementPipeline:
             if analysis_problems:
                 problems.append(
                     "incomplete orchestrator analysis — " + "; ".join(analysis_problems)
+                )
+            repeated_attempts = _negative_attempt_problems(
+                proposal,
+                loop_history or [],
+            )
+            if repeated_attempts:
+                problems.append(
+                    "repeated failed attempt — " + "; ".join(repeated_attempts)
                 )
             if not problems:
                 return proposal
@@ -701,18 +775,12 @@ def _target_run_refs(records: list[dict[str, Any]]) -> list[str]:
 
 
 def _analysis_problems(proposal: ImprovementProposal) -> list[str]:
-    """Hard-code Candidate packing invariants; prompt compliance is not enough."""
+    """Validate the single-Candidate/single-Task Orchestrator hand-off."""
 
     analysis = proposal.analysis
     problems = []
-    if not analysis.findings:
-        problems.append("at least one symptom/root-cause/capability finding is required")
-    if len(analysis.candidates) < 2:
-        problems.append("compare at least two intervention candidates")
     candidates = {candidate.name: candidate for candidate in analysis.candidates}
     selected = analysis.selected_candidates
-    if not selected:
-        problems.append("selected_candidates must contain at least one Candidate")
     if len(selected) != len(set(selected)):
         problems.append("selected_candidates must not contain duplicates")
     unknown = [name for name in selected if name not in candidates]
@@ -720,50 +788,19 @@ def _analysis_problems(proposal: ImprovementProposal) -> list[str]:
         problems.append(
             "selected_candidates must name declared candidates: " + ", ".join(unknown)
         )
-    budget = analysis.batch_budget
-    if len(selected) > budget.max_candidates:
-        problems.append("selected Candidate count exceeds batch_budget.max_candidates")
-    if len(proposal.tasks) > budget.max_tasks:
-        problems.append("Task count exceeds batch_budget.max_tasks")
-    selected_candidates = [candidates[name] for name in selected if name in candidates]
-    total_effort = sum(candidate.effort for candidate in selected_candidates)
-    if total_effort > budget.max_total_effort:
-        problems.append("selected Candidate effort exceeds batch_budget.max_total_effort")
-    if budget.selected_total_effort != total_effort:
-        problems.append("batch_budget.selected_total_effort does not match selected Candidates")
-    if len(selected_candidates) > 1 and any(c.effort > 2 for c in selected_candidates):
-        problems.append("multi-Candidate batches may contain only small Candidates (effort <= 2)")
-    if len(selected_candidates) > 1 and not analysis.compatibility_notes:
-        problems.append("multi-Candidate batches require compatibility_notes")
-    conflict_pairs = {
-        tuple(sorted((candidate.name, conflict)))
-        for candidate in selected_candidates
-        for conflict in candidate.conflicts_with
-        if conflict in selected
-    }
-    if conflict_pairs:
-        rendered = ", ".join(f"{left}<->{right}" for left, right in sorted(conflict_pairs))
-        problems.append(f"selected Candidates conflict: {rendered}")
-    task_candidates = [task.candidate for task in proposal.tasks]
-    missing_owner = [task.id for task in proposal.tasks if task.candidate not in selected]
+    if proposal.decision != "abstain" and len(selected) != 1:
+        problems.append("a proceeding Loop must select exactly one Candidate")
+    if proposal.decision != "abstain" and len(proposal.tasks) != 1:
+        problems.append("a Loop must contain exactly one implementation Task")
+    missing_owner = [
+        task.id
+        for task in proposal.tasks
+        if task.candidate not in selected
+    ]
     if missing_owner:
         problems.append(
             "every Task must name an owning selected Candidate: " + ", ".join(missing_owner)
         )
-    unimplemented = [name for name in selected if name not in task_candidates]
-    if unimplemented:
-        problems.append(
-            "every selected Candidate must own at least one Task: " + ", ".join(unimplemented)
-        )
-    if not analysis.packing_reason.strip():
-        problems.append("packing_reason is required")
-    if not analysis.causal_mechanism.strip():
-        problems.append("causal_mechanism is required")
-    if not analysis.expected_capability_delta.strip():
-        problems.append("expected_capability_delta is required")
-    for index, finding in enumerate(analysis.findings):
-        if not finding.evidence_refs:
-            problems.append(f"finding {index} must cite evidence_refs")
     return problems
 
 
@@ -828,7 +865,6 @@ def _materialize_loop_record(
                     "phase": task.phase,
                     "repair_iteration": task.repair_iteration,
                     "writer_summary": task.writer_summary,
-                    "writer_report": jsonable(task.writer_report),
                     "attempts": task.attempts,
                     "commit": task.commit,
                 }
@@ -868,10 +904,11 @@ def _materialize_loop_record(
             [
                 ComponentRecord(
                     component="acceptance_runner",
-                    status="passed" if result.delivery.hard_gate_ok else "failed",
+                    status="passed" if result.delivery.delivery_gate_ok else "failed",
                     summary="; ".join(result.delivery.acceptance_failures),
                     details={
                         "runs": jsonable(result.delivery.runs),
+                        "scenario_runs": jsonable(result.delivery.scenario_runs),
                         "failures": result.delivery.acceptance_failures,
                     },
                 ),
@@ -886,8 +923,10 @@ def _materialize_loop_record(
                     status="accepted" if result.delivery.passed else "rejected",
                     summary="; ".join(result.delivery.reasons),
                     details={
-                        "hard_gate_ok": result.delivery.hard_gate_ok,
+                        "delivery_gate_ok": result.delivery.delivery_gate_ok,
                         "goal_accepted": result.delivery.goal_accepted,
+                        "handoff_failed": result.delivery.handoff_failed,
+                        "failure_kind": result.delivery.failure_kind,
                         "integrity_ok": result.delivery.integrity_ok,
                         "reasons": result.delivery.reasons,
                     },
@@ -896,14 +935,27 @@ def _materialize_loop_record(
         )
 
     diagnosis = proposal.analysis.model_dump(mode="json") if proposal else {}
+    achievements = []
     remaining = []
     delivered = result.delivery is not None and result.delivery.passed
-    if proposal is not None and not delivered:
-        remaining = [
-            finding.capability_gap
-            for finding in proposal.analysis.findings
-            if finding.capability_gap
-        ]
+    if proposal is not None:
+        if delivered:
+            selected = set(proposal.analysis.selected_candidates)
+            achievements = [
+                (
+                    f"{candidate.name}: {candidate.expected_capability_delta}"
+                    if candidate.expected_capability_delta
+                    else candidate.name
+                )
+                for candidate in proposal.analysis.candidates
+                if candidate.name in selected
+            ]
+        else:
+            remaining = [
+                finding.capability_gap
+                for finding in proposal.analysis.findings
+                if finding.capability_gap
+            ]
     commit = (
         result.version.verified_commit
         if result.version and result.version.verified_commit
@@ -921,9 +973,237 @@ def _materialize_loop_record(
         changed_paths=_changed_paths_from_diff(result.diff),
         commit=commit,
         completed=delivered,
+        achievements=achievements,
         remaining_gaps=remaining,
-        error=result.error,
+        failure_kind=(
+            result.delivery.failure_kind
+            if result.delivery is not None and not result.delivery.passed
+            else "none"
+        ),
+        attempt_fingerprint=(
+            _proposal_attempt_fingerprint(proposal) if proposal is not None else ""
+        ),
+        error=_loop_failure_summary(result),
     )
+
+
+def _proposal_attempt_fingerprint(proposal: ImprovementProposal) -> str:
+    """Stable identity for one Candidate plus its frozen verification strategy."""
+
+    payload = {
+        "candidates": sorted(
+            name.strip().casefold()
+            for name in proposal.analysis.selected_candidates
+        ),
+        "delivery_run": sorted(proposal.delivery_run),
+        "scenarios": sorted(
+            (
+                tuple(scenario.command),
+                scenario.requires_trajectory,
+                tuple(
+                    sorted(
+                        (condition.name, condition.state)
+                        for condition in scenario.executable_conditions
+                    )
+                ),
+                tuple(sorted(scenario.expected_behaviors)),
+                tuple(sorted(scenario.forbidden_behaviors)),
+            )
+            for scenario in proposal.delivery_scenarios
+        ),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _tag_baseline_trajectory(
+    records: list[dict[str, Any]],
+    *,
+    commit: str,
+) -> list[dict[str, Any]]:
+    """Bind pre-run observations to the commit they actually describe."""
+
+    return [
+        {
+            **record,
+            "evidence_source": str(record.get("evidence_source") or "baseline"),
+            "target_commit": str(record.get("target_commit") or commit),
+        }
+        for record in records
+    ]
+
+
+def _delivered_target_trajectory(
+    recursive_run_id: str,
+    result: PipelineResult,
+) -> list[dict[str, Any]]:
+    """Promote delivered Scenario evidence into the next Loop's target history."""
+
+    if (
+        result.delivery is None
+        or not result.delivery.passed
+        or result.version is None
+        or not result.version.verified_commit
+    ):
+        return []
+    records: list[dict[str, Any]] = []
+    commit = result.version.verified_commit
+    for scenario in result.delivery.scenario_runs:
+        target_run_id = (
+            f"{recursive_run_id}:loop:{result.loop}:scenario:{scenario.scenario_id}"
+        )
+        records.append(
+            {
+                "event_id": f"{target_run_id}:event:0",
+                "trajectory_kind": "target_agent",
+                "evidence_source": "delivered_scenario",
+                "target_commit": commit,
+                "run_id": target_run_id,
+                "session_id": target_run_id,
+                "type": "target_run_started",
+                "task_prompt": scenario.prompt,
+                "scenario_id": scenario.scenario_id,
+            }
+        )
+        saw_done = False
+        for index, event in enumerate(scenario.trajectory, start=1):
+            normalized = {
+                **event,
+                "event_id": f"{target_run_id}:event:{index}",
+                "trajectory_kind": "target_agent",
+                "evidence_source": "delivered_scenario",
+                "target_commit": commit,
+                "run_id": target_run_id,
+                "session_id": target_run_id,
+                "scenario_id": scenario.scenario_id,
+            }
+            if normalized.get("type") == "done":
+                saw_done = True
+                normalized.setdefault("outcome", "completed")
+                normalized.setdefault("final_response", scenario.output)
+            records.append(normalized)
+        if not saw_done:
+            records.append(
+                {
+                    "event_id": (
+                        f"{target_run_id}:event:{len(scenario.trajectory) + 1}"
+                    ),
+                    "trajectory_kind": "target_agent",
+                    "evidence_source": "delivered_scenario",
+                    "target_commit": commit,
+                    "run_id": target_run_id,
+                    "session_id": target_run_id,
+                    "type": "done",
+                    "outcome": "completed",
+                    "final_response": scenario.output,
+                    "scenario_id": scenario.scenario_id,
+                }
+            )
+    return records
+
+
+def _negative_attempt_problems(
+    proposal: ImprovementProposal,
+    loop_history: list[ReforgeLoopRecord],
+) -> list[str]:
+    """Reject an unchanged verification strategy after a recorded failed attempt."""
+
+    fingerprint = _proposal_attempt_fingerprint(proposal)
+    selected = set(proposal.analysis.selected_candidates)
+    problems: list[str] = []
+    for record in loop_history:
+        if record.completed or record.failure_kind == "none":
+            continue
+        previous_selected = set(
+            str(value)
+            for value in (record.diagnosis.get("selected_candidates") or [])
+        )
+        same_candidate = bool(selected & previous_selected)
+        if record.attempt_fingerprint == fingerprint:
+            problems.append(
+                f"{record.loop_id} already tried the same Candidate and verification "
+                f"strategy ({record.failure_kind})"
+            )
+            continue
+        missing_trajectory = (
+            record.failure_kind == "verification_gap"
+            and "trajectory" in record.error.casefold()
+        )
+        if (
+            same_candidate
+            and missing_trajectory
+            and any(scenario.requires_trajectory for scenario in proposal.delivery_scenarios)
+        ):
+            problems.append(
+                f"{record.loop_id} proved required trajectory unavailable for this "
+                "Candidate; use an adapter/observable scenario or abstain"
+            )
+        failed_safety = {
+            safety
+            for safety in _record_required_safety(record)
+            if f"adapter:safety:{safety}" in record.error
+        }
+        repeated_safety = failed_safety & _proposal_required_safety(proposal)
+        if same_candidate and repeated_safety:
+            problems.append(
+                f"{record.loop_id} already failed the same safety contract for this "
+                f"Candidate: {', '.join(sorted(repeated_safety))}; remove the unrelated "
+                "requirement, select the safety capability itself, or abstain"
+            )
+    return problems
+
+
+def _proposal_required_safety(proposal: ImprovementProposal) -> set[str]:
+    return {
+        str(safety)
+        for task in proposal.tasks
+        for safety in task.required_safety_properties
+    }
+
+
+def _record_required_safety(record: ReforgeLoopRecord) -> set[str]:
+    for component in record.components:
+        if component.component != "orchestrator":
+            continue
+        proposal = component.details.get("proposal")
+        if not isinstance(proposal, dict):
+            continue
+        tasks = proposal.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        return {
+            str(safety)
+            for task in tasks
+            if isinstance(task, dict)
+            for safety in (task.get("required_safety_properties") or [])
+        }
+    return set()
+
+
+def _has_next_loop(loop_i: int, max_loops: int) -> bool:
+    """Whether the recursive-run budget permits another Orchestrator loop."""
+
+    return loop_i + 1 < max_loops
+
+
+def _loop_failure_summary(result: PipelineResult) -> str:
+    """Put the actionable failed-gate reason in the next loop's bounded context."""
+
+    if result.error:
+        return result.error
+    if result.blocker is not None:
+        findings = [
+            finding.description
+            for finding in result.blocker.unresolved_findings
+            if finding.description
+        ]
+        detail = "; ".join(findings) or "Writer/Reviewer hand-off did not converge"
+        return f"task {result.blocker.task_id} blocked: {detail}"
+    if result.delivery is not None and not result.delivery.passed:
+        return "; ".join(result.delivery.reasons) or "delivery/commit gate rejected candidate"
+    if result.gate is not None and result.gate.decision != "proceed":
+        return "; ".join(result.gate.reasons)
+    return ""
 
 
 def _changed_paths_from_diff(diff: str) -> list[str]:
@@ -963,6 +1243,7 @@ def _as_converged(success: PipelineResult, terminal: PipelineResult) -> Pipeline
 def _repair_instruction(delivery: Delivery) -> str:
     """Turn a rejected delivery into a concrete repair brief for the Writer."""
     lines = [
+        f"Delivery classified this as {delivery.failure_kind}.",
         "The candidate did not pass delivery. Fix the PRODUCT CODE so it does. "
         "Here are the deterministic runner failures and high-level review findings. "
         "Repair the intended behavior exercised by the failing criterion; do not game "
@@ -976,10 +1257,46 @@ def _repair_instruction(delivery: Delivery) -> str:
     for r in delivery.runs:
         tail = r.output[-800:] if r.output else "(no output)"
         lines.append(f"\n$ {r.command} (exit {r.exit_code})\n{tail}")
+    for scenario in delivery.scenario_runs:
+        tail = scenario.output[-800:] if scenario.output else "(no output)"
+        lines.append(
+            f"\nScenario {scenario.scenario_id} argv={scenario.command} "
+            f"(exit {scenario.exit_code})\n{tail}"
+        )
     # the Deliverer's high-level proposal-vs-diff review (why it rejected).
     if not delivery.goal_accepted and delivery.goal_review:
         lines.append(f"\nDeliverer goal review:\n{delivery.goal_review}")
     return "\n".join(lines)
+
+
+def _delivery_is_writer_repairable(
+    delivery: Delivery,
+    *,
+    repairs: int,
+    max_repairs: int,
+) -> bool:
+    """Only observed product implementation defects may re-enter Writer."""
+
+    return (
+        not delivery.passed
+        and delivery.integrity_ok
+        and not delivery.handoff_failed
+        and delivery.failure_kind == "implementation_defect"
+        and repairs < max_repairs
+    )
+
+
+def _changed_files_from_diff(diff: str) -> list[str]:
+    """Extract authoritative changed paths from a unified Git diff."""
+
+    paths: list[str] = []
+    for line in diff.splitlines():
+        if not line.startswith("diff --git a/"):
+            continue
+        _left, separator, right = line.removeprefix("diff --git a/").partition(" b/")
+        if separator and right not in paths:
+            paths.append(right)
+    return paths
 
 
 def render_report(result: PipelineResult) -> str:
@@ -1041,8 +1358,22 @@ def render_report(result: PipelineResult) -> str:
         for r in result.delivery.runs:
             tail = r.output[-1500:] if r.output else ""
             lines += [f"\n`$ {r.command}` (exit {r.exit_code})", "```", tail, "```"]
-        if result.delivery.goal_review:
-            lines += ["", "### Goal realization review", result.delivery.goal_review]
+    if result.delivery and result.delivery.scenario_runs:
+        lines += ["", "## End-to-end delivery scenarios"]
+        for run in result.delivery.scenario_runs:
+            lines += [
+                "",
+                f"### `{run.scenario_id}` — exit {run.exit_code}",
+                f"- **Prompt:** {run.prompt}",
+                f"- **Command:** `{run.command}`",
+                f"- **Changed fixture files:** {', '.join(run.changed_files) or '(none)'}",
+                f"- **Trajectory available:** {run.trajectory_available}",
+                "```text",
+                run.output[-1500:] if run.output else "(no output)",
+                "```",
+            ]
+    if result.delivery and result.delivery.goal_review:
+        lines += ["", "### Goal realization review", result.delivery.goal_review]
 
     if result.diff:
         diff = result.diff if len(result.diff) < 8000 else result.diff[:8000] + "\n...(truncated)"

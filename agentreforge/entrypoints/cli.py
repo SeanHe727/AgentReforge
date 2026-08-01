@@ -219,6 +219,12 @@ async def run_improve(
 
     # load recent agent runs as evidence for the Analyzer (empty on a fresh repo).
     target_trajectory = load_recent_target_trajectory(cwd)
+    if not target_trajectory:
+        typer.echo(
+            "[improve] no target-agent trajectory found for this repository; "
+            "using source-only diagnosis",
+            err=True,
+        )
     typer.echo(
         f"[improve] level={level} mode={governance} cycles={cycles} "
         f"target_trajectory={len(target_trajectory)} records analyzing: {intent}",

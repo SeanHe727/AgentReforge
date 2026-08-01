@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from ..llm.base import LlmClient
 from ..llm.collect import collect_text
+from ..orchestration.handoff import repair_handoff_output
 from ..types import Message
 
 REVIEWER_PROMPT = """You are a strict reviewer on an agent team.
@@ -17,6 +18,7 @@ If REJECTED, add a second line with concrete, actionable feedback for a retry.""
 class Review:
     approved: bool
     feedback: str = ""
+    handoff_failed: bool = False
 
 
 class Reviewer:
@@ -30,6 +32,27 @@ class Reviewer:
             [Message(role="user", content=f"Task:\n{task}\n\nWorker result:\n{result}")],
             system_prompt=REVIEWER_PROMPT,
         )
+        output_error = _review_output_error(text)
+        if output_error:
+            repaired = await repair_handoff_output(
+                self.client,
+                producer="Reviewer",
+                invalid_output=text,
+                validation_error=output_error,
+                contract=(
+                    "First line exactly APPROVED or REJECTED. "
+                    "REJECTED must include concrete feedback."
+                ),
+                context=f"Task:\n{task}\n\nWorker result:\n{result}",
+                validate=_review_output_error,
+            )
+            if repaired.error:
+                return Review(
+                    approved=False,
+                    feedback=repaired.error,
+                    handoff_failed=True,
+                )
+            text = repaired.text
         return self._parse(text)
 
     def _parse(self, text: str) -> Review:
@@ -43,3 +66,15 @@ class Reviewer:
         lines = cleaned.splitlines()
         feedback = "\n".join(lines[1:]).strip() or cleaned or "Rejected without specific feedback."
         return Review(approved=False, feedback=feedback)
+
+
+def _review_output_error(text: str) -> str:
+    lines = (text or "").strip().splitlines()
+    if not lines:
+        return "Reviewer output is empty"
+    verdict = lines[0].strip().upper()
+    if verdict not in {"APPROVED", "REJECTED"}:
+        return "first line must be exactly APPROVED or REJECTED"
+    if verdict == "REJECTED" and not "\n".join(lines[1:]).strip():
+        return "REJECTED requires concrete feedback"
+    return ""

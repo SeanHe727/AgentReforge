@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm.parse import parse_json_model
 from ..observability import traceable
 from ..orchestration.task_executor import ExecutorConfig, TaskExecutor
 from ..plan.models import ExecutionPlan, Task
@@ -24,15 +23,13 @@ from .models import (
     ImprovementProposal,
     ImprovementTask,
     ReviewResult,
-    WriterReport,
 )
 from .reviewer import AgenticReviewer
 from .worktree import WorktreeSession
 
 WRITER_PROMPT_SUFFIX = """
 You are the Writer on a self-improvement team. Implement EXACTLY the assigned
-task by editing code in the current working directory. Stay within the task's
-scope; satisfy its acceptance criteria.
+task by editing code in the current repository worktree.
 
 CRITICAL editing rules:
 - To change an EXISTING file, use `edit_file` (anchored replace) — NEVER `write_file`.
@@ -45,8 +42,8 @@ Own the task through a coherent candidate:
 - Treat the supplied Shared Task Contract as immutable. Implement every required
   behavior, preserve every invariant, obey every implementation constraint, and
   do not use a prohibited shortcut.
-- Modify only the exact files listed under Affected components. Never invent another
-  file path; report a deviation instead if the frozen scope cannot satisfy the task.
+- Affected components are suggestions, not an authorization wall. You may change
+  another repository file when the objective genuinely requires it; explain why.
 - Inspect the relevant code before editing.
 - Make focused changes, then run the task's executable acceptance commands.
 - Self-inspect the final task diff.
@@ -55,24 +52,10 @@ Own the task through a coherent candidate:
 
 If a Reviewer rejected a previous attempt, address the feedback directly.
 
-FINAL RESPONSE CONTRACT:
-When done, output exactly one ```json block containing a WriterReport:
-{
-  "task_id": "the assigned task id",
-  "summary": "what changed and why",
-  "changed_files": ["repo/relative/path"],
-  "clause_evidence": [
-    {"clause_id": "RB1", "implementation": "what implements it",
-     "evidence": "file:line or observed behavior"}
-  ],
-  "commands_run": [
-    {"command": "exact command", "exit_code": 0, "output_summary": "key result"}
-  ],
-  "known_limitations": [],
-  "deviations": []
-}
-Include one clause_evidence entry for every required review clause id. Do not claim
-commands you did not run. The report is evidence for review, not proof by itself."""
+Your implementation in the worktree is the deliverable. The Reviewer receives the
+frozen Task and authoritative Git diff, then independently inspects and tests the
+current repository. Your final text is only an optional short note; it has no schema
+and is never treated as evidence."""
 
 
 @dataclass
@@ -84,7 +67,6 @@ class TaskOutcome:
     rounds: int
     review: ReviewResult
     writer_summary: str
-    writer_report: WriterReport | None = None
     commit: str | None = None
     attempts: list[str] = field(default_factory=list)
     phase: str = "implementation"  # implementation | repair
@@ -249,7 +231,6 @@ class WriterReviewer:
                 rounds=tr.rounds,
                 review=tr.review or ReviewResult(verdict="revise", summary="no review"),
                 writer_summary=tr.result,
-                writer_report=_parse_writer_report(tr.result),
                 commit=tr.commit,
                 attempts=tr.attempts,
                 phase=phase,
@@ -286,20 +267,12 @@ def _repair_brief(instruction: str, allowed_write_paths: list[str]) -> str:
         "Shared Task Contract [repair]\n"
         "Required review clause ids: REPAIR1\n"
         f"Objective: {instruction}\n"
-        "Affected components: "
-        + (", ".join(allowed_write_paths) or "(none; do not modify product files)")
+        "Suggested components: "
+        + (", ".join(allowed_write_paths) or "(inspect the repository)")
         + "\n"
         "Required behaviors:\n"
-        "- [REPAIR1] Resolve the reported delivery failure without regressing the candidate. "
-        "Revert any existing repair change outside Affected components before finishing."
+        "- [REPAIR1] Resolve the reported delivery failure without regressing the candidate."
     )
-
-
-def _parse_writer_report(text: str) -> WriterReport | None:
-    try:
-        return parse_json_model(text, WriterReport)
-    except ValueError:
-        return None
 
 
 def _task_brief(
@@ -372,8 +345,8 @@ def _task_contract_text(spec: ImprovementTask) -> str:
         f"Capability change: {spec.capability_change}",
         "Required safety properties: "
         + (", ".join(spec.required_safety_properties) or "(none declared)"),
-        "Affected components: "
-        + (", ".join(spec.affected_components) or "(use proposal write scope)"),
+        "Suggested components: "
+        + (", ".join(spec.affected_components) or "(inspect the repository)"),
         *clauses("Required behaviors", spec.required_behaviors),
         *clauses("Implementation constraints", spec.implementation_constraints),
         *clauses("Invariants", spec.invariants),

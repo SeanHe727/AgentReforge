@@ -19,9 +19,21 @@ def test_orchestrator_distinguishes_candidate_and_task_dependencies():
     assert "Never put a Candidate" in ORCHESTRATOR_PROMPT
 
 
-def test_orchestrator_requires_literal_traversal_in_safety_check():
-    assert "relative `..` escape" in ORCHESTRATOR_PROMPT
-    assert "stable blocked/error marker" in ORCHESTRATOR_PROMPT
+def test_orchestrator_treats_safety_checks_as_explicit_not_heuristic():
+    assert "verified_safety_properties" in ORCHESTRATOR_PROMPT
+    assert "Safety probes are system-owned" in ORCHESTRATOR_PROMPT
+    assert "actual tool-level traversal" in ORCHESTRATOR_PROMPT
+    assert "Never encode a condition that rewards the" in ORCHESTRATOR_PROMPT
+    assert "safety violation" in ORCHESTRATOR_PROMPT
+    assert "literal `..` escape" not in ORCHESTRATOR_PROMPT
+
+
+def test_orchestrator_has_single_task_achievement_and_anti_reward_hacking_rules():
+    assert "Build an Achievement Ledger" in ORCHESTRATOR_PROMPT
+    assert "exactly ONE Candidate" in ORCHESTRATOR_PROMPT
+    assert "exactly ONE implementation Task" in ORCHESTRATOR_PROMPT
+    assert "merely to make AgentReforge's gate or evaluator pass" in ORCHESTRATOR_PROMPT
+    assert "The recursion limit is a ceiling, never a target" in ORCHESTRATOR_PROMPT
 
 
 def test_proposal_schema_repair_can_recover_on_second_retry():

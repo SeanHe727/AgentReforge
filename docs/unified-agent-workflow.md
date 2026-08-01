@@ -75,19 +75,16 @@ flowchart TD
 
 - **Recursive Run** is the largest execution unit. It owns one branch and one
   worktree for its full lifetime and may contain multiple Loops.
-- **Loop**, also called an **Improvement Batch**, is one
-  Orchestrator -> Writer/Reviewer -> Delivery cycle. It selects a bounded set of
-  one to three Candidates and ends with exactly one accepted commit or a recorded
-  failure/abstention.
+- **Loop** is one Orchestrator -> Writer/Reviewer -> Delivery cycle. It selects
+  exactly one Candidate, executes exactly one coherent capability Task, and ends
+  with exactly one accepted commit or a recorded failure/abstention.
 - **Candidate** is one ranked potential improvement identified by the
-  Orchestrator. A large Candidate normally occupies a Batch alone; two or three
-  small compatible Candidates may share a Batch even when their objectives are
-  independent.
-- **Task** is an independently implemented and reviewed unit owned by exactly one
-  selected Candidate. One large Candidate may be split into several Tasks.
+  Orchestrator. Each Loop selects one evidence-backed, currently unsolved Candidate.
+- **Task** is the Loop's one independently implemented and reviewed unit. It may
+  touch multiple files for a coherent capability but keeps one objective.
 - **Review Round** is one bounded Writer -> Reviewer attempt for a Task.
-- **Delivery** is the Batch-level integration gate. It runs frozen checks, judges
-  whether every selected Candidate is realized, verifies the candidate Git tree
+- **Delivery** is the Loop-level runnable gate. It runs frozen checks, judges
+  whether the selected Candidate is realized, verifies the candidate Git tree
   is unchanged by delivery checks, and accepts the one Loop commit.
 
 ## 4. One Orchestrator
@@ -106,7 +103,8 @@ The Orchestrator receives two histories that must never be conflated:
 
 - **Target-agent trajectory:** the original task prompt, observable target-agent
   tool calls/results, final response, errors, and outcome. This is diagnostic
-  evidence for deciding what capability to improve.
+  evidence for deciding what capability to improve. Each run records its
+  `target_commit`, `evidence_source`, and whether it describes the current Loop base.
 - **AgentReforge trajectory:** one record per improvement loop, grouped under a
   stable recursive-run id. It contains the Orchestrator diagnosis/proposal,
   Writer task attempts, Reviewer findings, policy decisions, Deliverer result,
@@ -117,15 +115,29 @@ runs, current repository structure, the recursive-run manifest, and prior loops
 from the same run. Historical retrieval is deliberately secondary: SQLite FTS
 may find analogous older loops, but it never replaces direct current-run facts.
 
+The initial target trajectories are bound to the Recursive Run's base commit.
+After a Loop is delivered, its frozen Scenario runs are normalized into new
+target-agent runs with `evidence_source=delivered_scenario` and the delivered commit,
+then appended to the next Loop's context. Older baseline runs remain inspectable but
+become `is_current=false`; they cannot prove that a newly delivered capability is
+still ineffective.
+
+Capability-level achievement de-duplication remains an Orchestrator reasoning
+responsibility. It compares mechanisms and expected capability deltas rather than
+Candidate-name equality. A renamed refinement of a delivered capability requires new
+current-commit evidence; stale baseline behavior is not sufficient justification.
+
 The Orchestrator follows a fixed reasoning workflow:
 
 ```text
 Orient -> Diagnose symptom/root cause/capability gap
        -> Generate interventions at multiple leverage levels
        -> Rank Candidates by evidence/benefit/risk/effort
-       -> Pack 1-3 compatible Candidates into an Improvement Batch
-       -> Explain each causal mechanism and the packing decision
-       -> Plan tasks and validate the DAG/acceptance contract
+       -> Exclude completed achievements and Delivery-only reward hacks
+       -> Select one unsolved Candidate
+       -> Plan one bounded Task
+       -> Freeze runnable Delivery scenarios before implementation
+       -> Validate the Task and acceptance contracts
 ```
 
 A possible top-level interface is:
@@ -211,36 +223,27 @@ class ImprovementTask(BaseModel):
     acceptance_criteria_ids: list[str]
 ```
 
-The Writer implements every clause and returns a validated `WriterReport` containing
-the task id, changed files, per-clause implementation evidence, commands and results,
-known limitations, and deviations. A malformed report or one that omits a contract
-clause is rejected before LLM review. The Reviewer receives that same contract,
-validated report, and task-scoped diff, then audits every required behavior and
-invariant with code or runtime evidence. A rejection cites the failed clause id and
-a concrete required fix.
+The Writer's implementation hand-off is the task-scoped Git diff and current
+repository state. Writer prose is an optional note with no schema and is never
+treated as evidence. Changed files come from Git; verification comes from the
+Reviewer and AcceptanceRunner rather than self-reported commands or clause claims.
 
-The Reviewer is Task-scoped: it judges the frozen Task contract and that Task's
-diff. It must not demand a pristine worktree or confuse expected product changes
-with runtime artifacts. Cross-Task compatibility, full-Batch goal realization,
-and pre/post tree immutability belong to Delivery.
+The Reviewer judges the Loop's frozen Task contract and its authoritative diff,
+including cross-file integration within that one capability. It must not demand a
+pristine worktree or confuse expected product changes with runtime artifacts.
+Runnable delivery and pre/post tree immutability belong to Delivery.
 
 ```text
 Orchestrator -> frozen task contract -> Writer -> task-scoped diff
                          \----------------------> Reviewer
-Reviewer REVISE -> clause-specific feedback -> Writer
+Reviewer needs_fix -> evidenced blocking findings -> Writer
 ```
 
-The proposal validator rejects a task before writing begins when its rationale,
-capability change, required behaviors, invariants, reviewer focus, or traceable
-clause ids are missing. This prevents a strategically sound proposal from degrading
-into a vague implementation hand-off.
-
-As a lightweight safety floor, a Task that changes path-taking tools must declare
-`path_confinement`. One assigned executable acceptance criterion must carry the
-same property, attempt a relative `..` traversal, and assert a stable rejection
-marker. The Task Reviewer repeats that negative check rather than accepting a
-“read-only” or “confined” comment as evidence. This is intentionally a minimum
-guard, not a comprehensive filesystem-security suite.
+Only task id, objective, and valid dependencies are required. Candidate ownership,
+clauses, affected components, acceptance hints, and safety-property declarations
+remain available when they clarify the work but are not mandatory schema gates.
+Suggested components do not prevent the Writer from making a necessary integration
+change elsewhere inside the repository worktree.
 
 ## 6. Two Governance Modes
 
@@ -354,8 +357,9 @@ Validation must check at least:
 - every dependency references an existing task;
 - the graph is acyclic;
 - the graph contains at least one runnable root task;
-- required acceptance criteria are assigned to tasks;
-- tasks that can modify code have an allowed scope.
+
+Acceptance assignment and suggested file scope are agent planning concerns rather
+than Task-plan validity conditions.
 
 Runtime task states should be explicit:
 
@@ -417,37 +421,44 @@ The Evaluation Agent may also inspect:
 It may produce structured findings and request another bounded implementation
 round. It must not be the sole final acceptance authority.
 
-### 9.3 Deterministic verification
+### 9.3 Minimal deterministic verification
 
-The final verifier should execute and record:
+The deterministic Delivery/Commit Gate records only:
 
-- frozen generated tests;
-- existing regression tests;
-- lint and type checks defined by the target;
-- before/after benchmarks;
-- permission and changed-path checks;
-- confirmation that the writer did not edit the frozen evaluation artifact;
-- required acceptance-criterion outcomes.
+- safe execution of one minimal package/CLI smoke command;
+- explicit system-owned safety-property commands, when declared;
+- denial of destructive commands and generated runtime artifacts;
+- confirmation that verification did not mutate the candidate;
+- equality of the verified and committed Git trees.
 
-Final acceptance should be derived from these results according to explicit rules.
-An LLM review is supporting evidence, not the only hard gate.
+Orchestrator-generated functional criteria, exact natural-language output markers,
+lint, benchmarks, and optional regression checks are Reviewer evidence by default.
+They do not become commit-blocking merely because an LLM marked them `required`.
 
 ### 9.4 Deliverer boundary
 
-The delivery stage has two distinct parts:
+The Deliverer is one conceptual component with two internal parts:
 
-1. A deterministic contract runner executes the frozen full-Batch commands,
-   evaluates exit codes and declared output assertions, and the Pipeline compares
-   the pre/post candidate tree snapshots.
-2. The Deliverer LLM receives the frozen Orchestrator goals, all selected
-   Candidates and causal mechanisms, high-level requirements, and the complete
-   Loop diff. It decides whether every Candidate is realized and whether the
-   combined Batch integrates successfully.
+1. **Runner:** executes minimal end-to-end/smoke commands, explicit safety checks,
+   and capability-specific scenarios frozen by the Orchestrator before the Writer
+   runs. Each scenario supplies a target-agent prompt, safe argv command, isolated
+   fixture workspace, expected/forbidden behaviors, and optional typed executable
+   conditions declared by the Orchestrator. The trusted Runner materializes those
+   conditions without accepting arbitrary environment variables or setup scripts.
+   It records command, exit code, bounded output, changed artifacts, observed
+   environment facts, and a JSONL target-agent trajectory when
+   `requires_trajectory` is frozen. The Pipeline separately compares pre/post
+   candidate tree snapshots.
+2. **Delivery Judge:** receives the Runner records, frozen Orchestrator goal,
+   selected Candidate and causal mechanism, high-level requirements, and complete
+   Loop diff. It decides whether the observed runnable behavior realizes the goal
+   and classifies a rejection as `implementation_defect`, `verification_gap`,
+   `plan_gap`, or `environment_failure`.
 
-The Deliverer does not re-run per-task review, interpret command output into
-unsupported PASS claims, or grade code generated by the target agent. Those
-belong to the task Reviewer, deterministic runner, and post-run capability
-evaluation respectively.
+The Delivery Judge does not repeat function-level code review or targeted unit
+tests and cannot override a deterministic Runner failure. It may interpret actual
+output only as bounded evidence for goal realization; broader generated-code
+quality remains a post-run capability evaluation.
 
 The physical composition is:
 
@@ -455,14 +466,77 @@ The physical composition is:
 Pipeline
   -> DeliveryCoordinator
        -> AcceptanceRunner.run(proposal, cwd) -> AcceptanceRun
-       -> Deliverer.review(proposal, loop_diff) -> GoalReview
+       -> Deliverer.review(proposal, loop_diff, AcceptanceRun) -> typed GoalReview
        -> Delivery(passed = acceptance.passed and goal.accepted)
 ```
 
-Neither leaf component depends on the other. `DeliveryCoordinator` is the only
-component that combines their decisions. Worktree mutation/integrity remains a
-Pipeline responsibility because it owns candidate snapshots and Git isolation;
-it is not a Writer Task or Reviewer judgment.
+`DeliveryCoordinator` is the Deliverer facade: the Runner directly serves the
+Delivery Judge, while retaining an independently enforceable deterministic verdict.
+Worktree mutation/integrity remains a Pipeline responsibility because it owns
+candidate snapshots and Git isolation; it is not a Writer Task or Reviewer judgment.
+
+Failure routing follows the diagnosed cause rather than a generic retry:
+
+| Delivery classification | Next action |
+| --- | --- |
+| `implementation_defect` | Return the concrete scenario evidence to Writer for one bounded repair attempt. |
+| `verification_gap` | Do not edit product code; end the Loop and expose the missing evidence to the next Orchestrator decision. |
+| `plan_gap` | End the Loop; the next Orchestrator must choose a different cause or intervention. |
+| `environment_failure` | End the Loop without pretending that product behavior was judged. |
+
+The first integration surface is a generic CLI command with `{prompt}` and
+`{workspace}` placeholders. Targets may emit richer trajectory evidence to the
+path in `AGENTREFORGE_TRAJECTORY_PATH`; a broader target-adapter layer can be added
+without changing the Orchestrator/Deliverer contract.
+
+For the demo target, Runner automatically resolves `python -m demo_agent` to a
+system-owned adapter. The adapter executes the candidate worktree's real
+`run_task`, wraps its real tool dispatcher, and emits ordered `tool_result` and
+`done` events. Baseline diagnosis and post-change Delivery therefore use the same
+trajectory semantics; baseline events are never reused as proof of improved behavior.
+
+Scenario evidence is intentionally typed by observability. Final output and changed
+artifacts can prove externally visible outcomes, but a target's statement that it
+called a tool or verified its work is only self-report. A scenario that judges tool
+use, ordering, inspect-before-edit, or verify-after-edit sets
+`requires_trajectory=true`; missing trajectory then deterministically produces
+`verification_gap` before the LLM Judge runs.
+
+When a capability depends on runtime availability, the Orchestrator may freeze
+`executable_conditions` with only a command name and `available|unavailable`
+state. Runner constructs a scenario-local `PATH`, verifies the resulting facts,
+and includes them in Delivery evidence. Such scenarios require trajectory so the
+Judge can connect the declared environment to the target agent's actual tool path.
+If Runner cannot materialize the environment, the result is
+`environment_failure`, never a request for Writer to change product code.
+
+Plain `delivery_run` does not support Scenario placeholders. A safety criterion uses
+`mode=invariant` but supplies no generated command: safety probes are system-owned.
+For demo-agent path confinement, Runner creates an outside sentinel, asks the target
+tool dispatcher to read it through `../`, and succeeds only when the real tool blocks
+the traversal without exposing the sentinel.
+
+Safety requirements are opt-in rather than global invariants. A Task may declare
+`path_confinement` only when its selected Candidate implements or changes a
+path-taking/filesystem boundary, and it must reference a matching invariant safety
+criterion. An unrelated Candidate cannot be rejected because the baseline lacks a
+different safety capability; that capability belongs in its own future Loop. If the
+Delivery Judge accepts the selected goal while an incompatible safety probe fails,
+the result is a `plan_gap`, not an environment failure or an instruction to Writer.
+
+Every failed Loop records `failure_kind` plus an `attempt_fingerprint` covering the
+selected Candidate and frozen verification strategy. These form the
+Negative-Attempt Ledger. Proposal validation rejects an unchanged failed strategy,
+and after a missing-trajectory `verification_gap` it rejects the same Candidate with
+the same unavailable trajectory requirement. The Orchestrator must change the
+evidence mechanism, select a different supported Candidate, or abstain.
+It also rejects the same Candidate carrying a safety requirement that already failed,
+even if the model cosmetically rewrites its Scenario.
+
+Reviewer and Deliverer schema failures are returned to the same producer for
+output-only repair. They must never be converted into product-code repair
+instructions for another Agent. Writer has no output schema: its authoritative
+handoff is the Git diff.
 
 ### 9.5 Avoid correlated self-approval
 

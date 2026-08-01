@@ -3,16 +3,17 @@ from __future__ import annotations
 from conftest import make_proposal
 
 from agentreforge.improve.acceptance import validate_acceptance
+from agentreforge.improve.models import DeliveryScenario, ExecutableCondition
 
 
-def test_acceptance_contract_is_traceable_and_executable():
+def test_minimal_delivery_contract_is_valid():
     result = validate_acceptance(make_proposal())
 
     assert result.valid
     assert result.errors == []
 
 
-def test_acceptance_contract_rejects_unknown_and_unassigned_criteria():
+def test_handoff_rejects_unknown_acceptance_reference():
     proposal = make_proposal()
     proposal.tasks[0].acceptance_criteria_ids = ["missing"]
 
@@ -20,35 +21,10 @@ def test_acceptance_contract_rejects_unknown_and_unassigned_criteria():
 
     assert not result.valid
     assert "unknown criteria" in result.summary()
-    assert "not assigned" in result.summary()
 
 
-def test_acceptance_contract_requires_scope_and_command():
+def test_task_detail_and_suggested_scope_are_not_schema_gates():
     proposal = make_proposal(allowed_write_paths=[])
-    proposal.acceptance_criteria[0].command = ""
-
-    result = validate_acceptance(proposal)
-
-    assert not result.valid
-    assert "allowed_write_paths" in result.summary()
-    assert "has no command" in result.summary()
-
-
-def test_required_acceptance_criterion_must_be_executable():
-    proposal = make_proposal()
-    criterion = proposal.acceptance_criteria[0]
-    criterion.mode = "manual"
-    criterion.verification = "review"
-    criterion.command = ""
-
-    result = validate_acceptance(proposal)
-
-    assert not result.valid
-    assert "must use executable command verification" in result.summary()
-
-
-def test_acceptance_contract_rejects_thin_writer_reviewer_handoff():
-    proposal = make_proposal()
     task = proposal.tasks[0]
     task.candidate = ""
     task.rationale = ""
@@ -56,47 +32,101 @@ def test_acceptance_contract_rejects_thin_writer_reviewer_handoff():
     task.required_behaviors = []
     task.invariants = []
     task.reviewer_focus = []
+    task.affected_components = ["new or updated test path"]
+    proposal.acceptance_criteria[0].verification = "review"
+    proposal.acceptance_criteria[0].command = ""
+
+    assert validate_acceptance(proposal).valid
+
+
+def test_delivery_contract_requires_a_smoke_command_or_scenario():
+    proposal = make_proposal(delivery_run=[])
 
     result = validate_acceptance(proposal)
 
     assert not result.valid
-    assert "has no candidate" in result.summary()
-    assert "has no rationale" in result.summary()
-    assert "has no capability_change" in result.summary()
-    assert "has no required_behaviors" in result.summary()
-    assert "has no invariants" in result.summary()
-    assert "has no reviewer_focus" in result.summary()
+    assert "smoke command or frozen end-to-end scenario" in result.summary()
 
 
-def test_task_affected_components_must_be_concrete_and_authorized():
-    proposal = make_proposal()
-    task = proposal.tasks[0]
-    task.affected_components = ["src/agent.py", "new or updated test path"]
-
-    result = validate_acceptance(proposal)
-
-    assert not result.valid
-    assert (
-        "affected_components exceed allowed_write_paths: new or updated test path"
-        in result.summary()
+def test_frozen_scenario_can_replace_generic_smoke_command():
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="capability",
+                prompt="inspect the fixture",
+                command=[
+                    "python3",
+                    "-c",
+                    "import sys; print(sys.argv[1], sys.argv[2])",
+                    "{prompt}",
+                    "{workspace}",
+                ],
+                fixture_files={"src/example.py": "VALUE = 1\n"},
+                expected_behaviors=["inspect src/example.py"],
+            )
+        ],
     )
 
+    assert validate_acceptance(proposal).valid
 
-def test_acceptance_contract_requires_unique_traceable_clause_ids():
-    proposal = make_proposal()
-    task = proposal.tasks[0]
-    task.invariants[0].id = "RB1"
+
+def test_scenario_requires_prompt_workspace_placeholders_and_safe_fixture_paths():
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="bad",
+                prompt="inspect",
+                command=["python3", "-c", "print('nothing')"],
+                fixture_files={"../escape.py": "bad"},
+            )
+        ],
+    )
 
     result = validate_acceptance(proposal)
 
     assert not result.valid
-    assert "contract clause ids must be unique" in result.summary()
+    assert "must pass {prompt}" in result.summary()
+    assert "must pass {workspace}" in result.summary()
+    assert "unsafe fixture path" in result.summary()
 
 
-def test_acceptance_contract_rejects_unavailable_python_interpreter(monkeypatch):
-    proposal = make_proposal()
-    proposal.acceptance_criteria[0].command = "PYTHONDONTWRITEBYTECODE=1 python -m tests"
-    proposal.delivery_run = ["python -m package --help"]
+def test_scenario_environment_contract_requires_trajectory_and_no_conflicts():
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="fallback",
+                prompt="verify with python",
+                command=[
+                    "python3",
+                    "-c",
+                    "print('done')",
+                    "{prompt}",
+                    "{workspace}",
+                ],
+                executable_conditions=[
+                    ExecutableCondition(name="python", state="unavailable"),
+                    ExecutableCondition(name="python", state="available"),
+                ],
+            )
+        ],
+    )
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "conflicting executable conditions" in result.summary()
+    assert "must require trajectory evidence" in result.summary()
+
+
+def test_delivery_commands_require_available_interpreter(monkeypatch):
+    proposal = make_proposal(delivery_run=["python -m package --help"])
+    criterion = proposal.acceptance_criteria[0]
+    criterion.verified_safety_properties = ["path_confinement"]
+    criterion.mode = "invariant"
+    criterion.command = ""
     monkeypatch.setattr(
         "agentreforge.improve.acceptance.shutil.which",
         lambda executable: None if executable == "python" else f"/bin/{executable}",
@@ -105,36 +135,56 @@ def test_acceptance_contract_rejects_unavailable_python_interpreter(monkeypatch)
     result = validate_acceptance(proposal)
 
     assert not result.valid
-    assert result.summary().count("unavailable interpreter 'python'") == 2
+    assert result.summary().count("unavailable interpreter 'python'") == 1
 
 
-def test_path_tool_task_requires_executable_traversal_acceptance():
+def test_system_owned_safety_property_requires_invariant_mode_and_no_command():
     proposal = make_proposal()
-    task = proposal.tasks[0]
+    proposal.tasks[0].candidate = "confine file paths"
+    proposal.tasks[0].description = "Keep file access inside the workspace root"
+    proposal.tasks[0].required_safety_properties = ["path_confinement"]
     criterion = proposal.acceptance_criteria[0]
-    proposal.allowed_write_paths = ["coder/tools.py"]
-    task.affected_components = ["coder/tools.py"]
-    task.description = "Add repository navigation and directory-listing tools"
-
-    missing_declaration = validate_acceptance(proposal)
-    assert "does not require safety property 'path_confinement'" in (
-        missing_declaration.summary()
-    )
-
-    task.required_safety_properties = ["path_confinement"]
-    missing_coverage = validate_acceptance(proposal)
-    assert "no assigned acceptance criterion" in missing_coverage.summary()
-
     criterion.verified_safety_properties = ["path_confinement"]
-    weak_criterion = validate_acceptance(proposal)
-    assert "must exercise a '..' traversal attempt" in weak_criterion.summary()
-    assert "stable blocked/error output marker" in weak_criterion.summary()
+    criterion.mode = "red_green"
+    criterion.command = "python3 -c \"print('confined')\""
 
-    criterion.command = (
-        "PYTHONDONTWRITEBYTECODE=1 python3 -c \"from coder.tools import execute; "
-        "result = execute('list_dir', {'path': '..'}, '.'); "
-        "assert result.startswith('error:'); print('PATH_BLOCKED')\""
-    )
-    criterion.required_output_contains = ["PATH_BLOCKED"]
+    invalid = validate_acceptance(proposal)
+
+    assert not invalid.valid
+    assert "must use invariant mode" in invalid.summary()
+    assert "system-owned" in invalid.summary()
+
+    criterion.mode = "invariant"
+    criterion.command = ""
 
     assert validate_acceptance(proposal).valid
+
+
+def test_unrelated_task_cannot_declare_path_confinement():
+    proposal = make_proposal()
+    proposal.tasks[0].description = "Improve the runtime execution path"
+    proposal.tasks[0].required_safety_properties = ["path_confinement"]
+    criterion = proposal.acceptance_criteria[0]
+    criterion.mode = "invariant"
+    criterion.command = ""
+    criterion.verified_safety_properties = ["path_confinement"]
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "does not change a path-taking or filesystem boundary" in result.summary()
+
+
+def test_safety_check_rejects_llm_generated_probe_and_delivery_placeholder():
+    proposal = make_proposal(delivery_run=["python3 -m package --help {workspace}"])
+    criterion = proposal.acceptance_criteria[0]
+    criterion.verified_safety_properties = ["path_confinement"]
+    criterion.mode = "red_green"
+    criterion.command = "python3 -m package {prompt} --dir {workspace}"
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "must use invariant mode" in result.summary()
+    assert "system-owned" in result.summary()
+    assert result.summary().count("scenario-only placeholder") == 1

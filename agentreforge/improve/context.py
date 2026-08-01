@@ -91,7 +91,10 @@ class OrchestratorContextBuilder:
         previous_reforge_loops: list[ReforgeLoopRecord],
         run_manifest: dict[str, Any],
     ) -> OrchestratorContext:
-        summaries, evidence = summarize_target_trajectory(target_trajectory)
+        summaries, evidence = summarize_target_trajectory(
+            target_trajectory,
+            current_commit=str(run_manifest.get("loop_base") or ""),
+        )
         raw_evidence = {}
         for index, record in enumerate(target_trajectory):
             run_id = str(record.get("run_id") or record.get("session_id") or "unknown")
@@ -148,6 +151,8 @@ class OrchestratorContextBuilder:
 
 def summarize_target_trajectory(
     records: list[dict[str, Any]],
+    *,
+    current_commit: str = "",
 ) -> tuple[list[TargetRunSummary], list[dict[str, Any]]]:
     """Build lossless-enough target-run summaries without LLM interpretation."""
 
@@ -166,10 +171,14 @@ def summarize_target_trajectory(
         tool_errors = 0
         errors: list[str] = []
         refs: list[str] = []
+        evidence_source = "external"
+        target_commit = ""
 
         for index, event in events:
             event_id = str(event.get("event_id") or f"{run_id}:event:{index}")
             event_type = str(event.get("type") or "")
+            evidence_source = str(event.get("evidence_source") or evidence_source)
+            target_commit = str(event.get("target_commit") or target_commit)
             if event_type in {"target_run_started", "run_started"}:
                 task_prompt = str(event.get("task_prompt") or task_prompt)
             elif event_type == "tool_result":
@@ -193,6 +202,8 @@ def summarize_target_trajectory(
                         "tool": event.get("name"),
                         "arguments": event.get("arguments"),
                         "is_error": event.get("is_error"),
+                        "evidence_source": event.get("evidence_source"),
+                        "target_commit": event.get("target_commit"),
                         "content": str(
                             event.get("content")
                             or event.get("error")
@@ -213,6 +224,13 @@ def summarize_target_trajectory(
                 tools_used=list(dict.fromkeys(tools)),
                 error_messages=errors,
                 evidence_refs=refs,
+                evidence_source=evidence_source,
+                target_commit=target_commit,
+                is_current=bool(
+                    current_commit
+                    and target_commit
+                    and target_commit == current_commit
+                ),
             )
         )
     return summaries, evidence_catalog[:_MAX_EVIDENCE_RECORDS]
@@ -246,6 +264,9 @@ def _summarize_reforge_loop(record: ReforgeLoopRecord) -> ReforgeLoopSummary:
         },
         commit=record.commit,
         completed=record.completed,
+        achievements=record.achievements,
         remaining_gaps=record.remaining_gaps,
+        failure_kind=record.failure_kind,
+        attempt_fingerprint=record.attempt_fingerprint,
         error=record.error,
     )

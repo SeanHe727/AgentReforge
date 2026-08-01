@@ -36,6 +36,9 @@ class TargetRunSummary(BaseModel):
     tools_used: list[str] = Field(default_factory=list)
     error_messages: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    evidence_source: str = "external"
+    target_commit: str = ""
+    is_current: bool = False
 
 
 class ComponentRecord(BaseModel):
@@ -71,7 +74,10 @@ class ReforgeLoopRecord(BaseModel):
     diff_ref: str = ""
     commit: str = ""
     completed: bool = False
+    achievements: list[str] = Field(default_factory=list)
     remaining_gaps: list[str] = Field(default_factory=list)
+    failure_kind: str = "none"
+    attempt_fingerprint: str = ""
     error: str = ""
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -89,7 +95,10 @@ class ReforgeLoopSummary(BaseModel):
     component_status: dict[str, str] = Field(default_factory=dict)
     commit: str = ""
     completed: bool = False
+    achievements: list[str] = Field(default_factory=list)
     remaining_gaps: list[str] = Field(default_factory=list)
+    failure_kind: str = "none"
+    attempt_fingerprint: str = ""
     error: str = ""
 
 

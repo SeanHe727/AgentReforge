@@ -1,4 +1,4 @@
-"""Composition boundary for deterministic acceptance and high-level delivery review."""
+"""Deliverer facade: deterministic Runner plus runtime goal judgment."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..observability import traceable
-from .acceptance_runner import AcceptanceRunner, RunResult
+from .acceptance_runner import AcceptanceRunner, RunResult, ScenarioRunResult
 from .deliverer import Deliverer
 from .models import ImprovementProposal
 
@@ -17,10 +17,13 @@ class Delivery:
 
     passed: bool
     runs: list[RunResult] = field(default_factory=list)
-    hard_gate_ok: bool = True
+    scenario_runs: list[ScenarioRunResult] = field(default_factory=list)
+    delivery_gate_ok: bool = True
     acceptance_failures: list[str] = field(default_factory=list)
     goal_accepted: bool = False
     goal_review: str = ""
+    handoff_failed: bool = False
+    failure_kind: str = "none"
     reasons: list[str] = field(default_factory=list)
     # Worktree integrity is populated by Pipeline._deliver_immutable because
     # candidate snapshots/version isolation belong to the Pipeline.
@@ -30,7 +33,7 @@ class Delivery:
 
 
 class DeliveryCoordinator:
-    """The only component that combines AcceptanceRunner and Deliverer verdicts."""
+    """The Deliverer boundary combining its Runner and LLM runtime judge."""
 
     def __init__(
         self,
@@ -62,23 +65,52 @@ class DeliveryCoordinator:
         loop_diff: str = "",
     ) -> Delivery:
         acceptance = await self.runner.run(proposal, cwd=cwd)
-        goal = await self.deliverer.review(proposal, loop_diff=loop_diff)
+        goal = await self.deliverer.review(
+            proposal,
+            loop_diff=loop_diff,
+            acceptance=acceptance,
+        )
 
         reasons = list(acceptance.failures)
         if not acceptance.passed:
-            reasons.insert(0, "deterministic acceptance hard gate failed")
-        if not goal.accepted:
-            reasons.append("high-level goal realization review rejected")
+            reasons.insert(0, "deterministic delivery/commit gate failed")
+        if goal.handoff_failed:
+            reasons.append("Deliverer output hand-off failed")
+        elif not goal.accepted:
+            reasons.append(
+                "high-level goal realization review rejected "
+                f"(root cause: {goal.failure_kind})"
+            )
         passed = acceptance.passed and goal.accepted
+        failure_kind = goal.failure_kind
+        if not passed and failure_kind == "none":
+            if goal.accepted and _has_failed_safety_probe(acceptance.failures):
+                # The product goal was realized, but the frozen plan attached an
+                # incompatible safety contract. Replanning is safer than asking
+                # Writer to implement an unrelated capability.
+                failure_kind = "plan_gap"
+            else:
+                failure_kind = (
+                    "environment_failure"
+                    if not acceptance.passed
+                    else "implementation_defect"
+                )
         return Delivery(
             passed=passed,
             runs=acceptance.runs,
-            hard_gate_ok=acceptance.passed,
+            scenario_runs=acceptance.scenario_runs,
+            delivery_gate_ok=acceptance.passed,
             acceptance_failures=acceptance.failures,
             goal_accepted=goal.accepted,
             goal_review=goal.text,
+            handoff_failed=goal.handoff_failed,
+            failure_kind=failure_kind,
             reasons=(
                 reasons
-                or ["deterministic hard gate + high-level goal realization review passed"]
+                or ["delivery/commit gate + high-level goal realization review passed"]
             ),
         )
+
+
+def _has_failed_safety_probe(failures: list[str]) -> bool:
+    return any("system safety probe" in failure for failure in failures)

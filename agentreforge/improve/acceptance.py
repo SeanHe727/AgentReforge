@@ -5,9 +5,9 @@ from __future__ import annotations
 import shlex
 import shutil
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
+from pathlib import PurePosixPath
 
-from .models import AcceptanceCriterion, ImprovementProposal, ImprovementTask
+from .models import ImprovementProposal, ImprovementTask
 
 
 @dataclass
@@ -20,136 +20,171 @@ class AcceptanceValidation:
 
 
 def validate_acceptance(proposal: ImprovementProposal) -> AcceptanceValidation:
-    """Require executable checks plus complete shared task contracts."""
+    """Validate only the executable delivery contract and cross-references.
+
+    Task quality, clause completeness, suggested file scope, and test design are
+    agent-review concerns rather than hand-off schema gates.
+    """
     errors: list[str] = []
     criteria = proposal.acceptance_criteria
-    criteria_by_id = {criterion.id: criterion for criterion in criteria}
     criterion_ids = [criterion.id for criterion in criteria]
     known = set(criterion_ids)
 
-    if not proposal.allowed_write_paths:
-        errors.append("allowed_write_paths must declare the approved write scope")
-    if not criteria:
-        errors.append("acceptance_criteria must not be empty")
     if len(criterion_ids) != len(known):
         errors.append("acceptance criterion ids must be unique")
+    if not proposal.delivery_run and not proposal.delivery_scenarios:
+        errors.append(
+            "delivery must contain a minimal smoke command or frozen end-to-end scenario"
+        )
 
-    assigned: set[str] = set()
     for task in proposal.tasks:
-        _validate_task_contract(task, errors)
-        _validate_task_write_scope(task, proposal.allowed_write_paths, errors)
-        if not task.acceptance_criteria_ids:
-            errors.append(f"task {task.id!r} has no acceptance_criteria_ids")
         unknown = sorted(set(task.acceptance_criteria_ids) - known)
         if unknown:
             errors.append(f"task {task.id!r} references unknown criteria: {', '.join(unknown)}")
-        _validate_task_safety(
-            task,
-            [
-                criteria_by_id[criterion_id]
-                for criterion_id in task.acceptance_criteria_ids
-                if criterion_id in criteria_by_id
-            ],
-            errors,
-        )
-        assigned.update(task.acceptance_criteria_ids)
-
-    unassigned = [c.id for c in criteria if c.required and c.id not in assigned]
-    if unassigned:
-        errors.append(f"required criteria are not assigned to a task: {', '.join(unassigned)}")
+        referenced = [
+            criterion
+            for criterion in criteria
+            if criterion.id in task.acceptance_criteria_ids
+        ]
+        for safety in task.required_safety_properties:
+            if not any(
+                safety in criterion.verified_safety_properties
+                for criterion in referenced
+            ):
+                errors.append(
+                    f"task {task.id!r} requires {safety!r} but does not reference "
+                    "a matching safety criterion"
+                )
+            if safety == "path_confinement" and not _task_is_path_relevant(task):
+                errors.append(
+                    f"task {task.id!r} declares path_confinement for a Candidate "
+                    "that does not change a path-taking or filesystem boundary"
+                )
 
     for criterion in criteria:
-        if criterion.required and criterion.verification != "command":
+        safety_check = bool(criterion.verified_safety_properties)
+        if safety_check and criterion.mode != "invariant":
             errors.append(
-                f"required criterion {criterion.id!r} must use executable command verification"
+                f"safety criterion {criterion.id!r} must use invariant mode"
             )
-        if criterion.verification == "command" and not criterion.command.strip():
-            errors.append(f"command criterion {criterion.id!r} has no command")
-        elif criterion.verification == "command":
-            _validate_command_executable(
-                criterion.command,
-                f"command criterion {criterion.id!r}",
-                errors,
+        if safety_check and criterion.command.strip():
+            errors.append(
+                f"safety criterion {criterion.id!r} is system-owned and must not "
+                "supply an LLM-generated command"
             )
-        _validate_safety_criterion(criterion, errors)
+        for safety in criterion.verified_safety_properties:
+            owners = [
+                task.id
+                for task in proposal.tasks
+                if criterion.id in task.acceptance_criteria_ids
+                and safety in task.required_safety_properties
+            ]
+            if not owners:
+                errors.append(
+                    f"safety criterion {criterion.id!r} verifies {safety!r} but no "
+                    "referencing Task requires it"
+                )
 
     for index, command in enumerate(proposal.delivery_run, start=1):
+        _reject_scenario_placeholders(command, f"delivery command {index}", errors)
         _validate_command_executable(command, f"delivery command {index}", errors)
+
+    scenario_ids = [scenario.id for scenario in proposal.delivery_scenarios]
+    if len(scenario_ids) != len(set(scenario_ids)):
+        errors.append("delivery scenario ids must be unique")
+    for scenario in proposal.delivery_scenarios:
+        if not scenario.prompt.strip():
+            errors.append(f"delivery scenario {scenario.id!r} requires a prompt")
+        if not scenario.command:
+            errors.append(f"delivery scenario {scenario.id!r} requires an argv command")
+        else:
+            _validate_argv_executable(
+                scenario.command,
+                f"delivery scenario {scenario.id!r}",
+                errors,
+            )
+            if not any("{prompt}" in arg for arg in scenario.command):
+                errors.append(
+                    f"delivery scenario {scenario.id!r} command must pass {{prompt}}"
+                )
+            if not any("{workspace}" in arg for arg in scenario.command):
+                errors.append(
+                    f"delivery scenario {scenario.id!r} command must pass {{workspace}}"
+                )
+        for rel_path in scenario.fixture_files:
+            path = PurePosixPath(rel_path)
+            if path.is_absolute() or ".." in path.parts:
+                errors.append(
+                    f"delivery scenario {scenario.id!r} has unsafe fixture path "
+                    f"{rel_path!r}"
+                )
+        condition_states: dict[str, str] = {}
+        for condition in scenario.executable_conditions:
+            previous = condition_states.get(condition.name)
+            if previous is None:
+                condition_states[condition.name] = condition.state
+            elif previous != condition.state:
+                errors.append(
+                    f"delivery scenario {scenario.id!r} declares conflicting "
+                    f"executable conditions for {condition.name!r}"
+                )
+            else:
+                errors.append(
+                    f"delivery scenario {scenario.id!r} repeats executable "
+                    f"condition {condition.name!r}"
+                )
+        if scenario.executable_conditions and not scenario.requires_trajectory:
+            errors.append(
+                f"delivery scenario {scenario.id!r} with executable conditions "
+                "must require trajectory evidence"
+            )
 
     return AcceptanceValidation(not errors, errors)
 
 
-def _validate_task_contract(task: ImprovementTask, errors: list[str]) -> None:
-    """Reject thin hand-offs before a Writer is allowed to modify code."""
-
-    required_text = {
-        "candidate": task.candidate,
-        "description": task.description,
-        "rationale": task.rationale,
-        "capability_change": task.capability_change,
-    }
-    for field_name, value in required_text.items():
-        if not value.strip():
-            errors.append(f"task {task.id!r} has no {field_name}")
-
-    required_lists = {
-        "required_behaviors": task.required_behaviors,
-        "invariants": task.invariants,
-        "reviewer_focus": task.reviewer_focus,
-    }
-    for field_name, values in required_lists.items():
-        if not values:
-            errors.append(f"task {task.id!r} has no {field_name}")
-
-    clauses = [
-        *task.required_behaviors,
-        *task.implementation_constraints,
-        *task.invariants,
-        *task.prohibited_shortcuts,
-    ]
-    clause_ids = [clause.id.strip() for clause in clauses]
-    if any(not clause_id for clause_id in clause_ids):
-        errors.append(f"task {task.id!r} has an empty contract clause id")
-    if len(clause_ids) != len(set(clause_ids)):
-        errors.append(f"task {task.id!r} contract clause ids must be unique")
-    for clause in clauses:
-        if not clause.description.strip():
-            errors.append(
-                f"task {task.id!r} clause {clause.id!r} has no description"
-            )
+def _task_is_path_relevant(task: ImprovementTask) -> bool:
+    text = " ".join(
+        [
+            task.candidate,
+            task.description,
+            task.rationale,
+            task.capability_change,
+            *(clause.description for clause in task.required_behaviors),
+            *(clause.description for clause in task.implementation_constraints),
+            *task.reviewer_focus,
+        ]
+    ).casefold()
+    return any(
+        marker in text
+        for marker in (
+            "path confinement",
+            "path-taking",
+            "file path",
+            "filesystem",
+            "file access",
+            "file-access",
+            "traversal",
+            "confinement",
+            "workspace root",
+            "repository discovery",
+        )
+    )
 
 
-def _validate_task_write_scope(
-    task: ImprovementTask,
-    allowed_write_paths: list[str],
+def _reject_scenario_placeholders(
+    command: str,
+    label: str,
     errors: list[str],
 ) -> None:
-    """Ensure every Writer hand-off names files already authorized by the proposal."""
-
-    if not task.affected_components:
-        errors.append(f"task {task.id!r} has no affected_components")
-        return
-    outside = [
-        component
-        for component in task.affected_components
-        if not _matches_write_scope(component, allowed_write_paths)
+    placeholders = [
+        placeholder
+        for placeholder in ("{prompt}", "{workspace}")
+        if placeholder in command
     ]
-    if outside:
+    if placeholders:
         errors.append(
-            f"task {task.id!r} affected_components exceed allowed_write_paths: "
-            + ", ".join(outside)
+            f"{label} uses scenario-only placeholder(s): {', '.join(placeholders)}"
         )
-
-
-def _matches_write_scope(path: str, scopes: list[str]) -> bool:
-    path = path.removeprefix("./")
-    for scope in scopes:
-        scope = scope.removeprefix("./")
-        if scope.endswith("/") and path.startswith(scope):
-            return True
-        if path == scope or fnmatch(path, scope):
-            return True
-    return False
 
 
 def _validate_command_executable(command: str, label: str, errors: list[str]) -> None:
@@ -176,68 +211,16 @@ def _validate_command_executable(command: str, label: str, errors: list[str]) ->
         )
 
 
-def _validate_task_safety(
-    task: ImprovementTask,
-    assigned_criteria: list[AcceptanceCriterion],
+def _validate_argv_executable(
+    argv: list[str],
+    label: str,
     errors: list[str],
 ) -> None:
-    """Require explicit, traceable coverage for lightweight path-tool safety."""
-
-    required = set(task.required_safety_properties)
-    if _looks_like_path_tool_task(task) and "path_confinement" not in required:
+    executable = argv[0].strip() if argv else ""
+    if not executable or "{" in executable:
+        errors.append(f"{label} requires a concrete executable as argv[0]")
+    elif shutil.which(executable) is None:
         errors.append(
-            f"task {task.id!r} changes path/navigation tools but does not require "
-            "safety property 'path_confinement'"
-        )
-    covered = {
-        safety_property
-        for criterion in assigned_criteria
-        for safety_property in criterion.verified_safety_properties
-    }
-    missing = sorted(required - covered)
-    if missing:
-        errors.append(
-            f"task {task.id!r} has no assigned acceptance criterion for safety "
-            f"properties: {', '.join(missing)}"
-        )
-
-
-def _looks_like_path_tool_task(task: ImprovementTask) -> bool:
-    contract = " ".join(
-        [
-            task.candidate,
-            task.description,
-            task.capability_change,
-            *(clause.description for clause in task.required_behaviors),
-            *(clause.description for clause in task.implementation_constraints),
-        ]
-    ).lower()
-    changes_tool_module = any(
-        component.lower().endswith("tools.py") or "/tools/" in component.lower()
-        for component in task.affected_components
-    )
-    path_terms = ("path", "directory", "navigation", "repository search", "file search")
-    return changes_tool_module and any(term in contract for term in path_terms)
-
-
-def _validate_safety_criterion(
-    criterion: AcceptanceCriterion,
-    errors: list[str],
-) -> None:
-    if "path_confinement" not in criterion.verified_safety_properties:
-        return
-    if criterion.verification != "command":
-        errors.append(
-            f"safety criterion {criterion.id!r} for path_confinement must be executable"
-        )
-        return
-    if ".." not in criterion.command:
-        errors.append(
-            f"safety criterion {criterion.id!r} for path_confinement must exercise "
-            "a '..' traversal attempt"
-        )
-    if not criterion.required_output_contains:
-        errors.append(
-            f"safety criterion {criterion.id!r} for path_confinement must require "
-            "a stable blocked/error output marker"
+            f"{label} uses unavailable executable {executable!r}; "
+            "choose one present in the execution environment"
         )

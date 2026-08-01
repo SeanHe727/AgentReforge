@@ -67,6 +67,7 @@ class ExecutorConfig:
     stop_on_block: bool = False  # stop the whole run + emit a blocker on non-convergence
     # give the worker a request_review tool so the Writer pushes each increment itself.
     writer_driven_review: bool = False
+    max_handoff_retries: int = 2
 
 
 @dataclass
@@ -211,7 +212,25 @@ class TaskExecutor:
                 await _emit(event_sink,
                             {"type": "text_delta", "text": f"[reviewer] approved {task.id}\n"})
                 return TaskResult(
-                    task.id, "completed", round_i, worker_text, verdict, None, attempts
+                    task.id,
+                    "completed",
+                    round_i,
+                    worker_text,
+                    verdict,
+                    None,
+                    attempts,
+                )
+            if verdict.verdict == "escalate":
+                # Repeated producer-interface failures are not implementation
+                # findings. Preserve the candidate and never ask Writer to edit it.
+                return TaskResult(
+                    task.id,
+                    "blocked",
+                    round_i,
+                    worker_text,
+                    verdict,
+                    None,
+                    attempts,
                 )
             await _emit(event_sink, _reject_event(task.id, round_i, verdict.summary))
 
@@ -230,7 +249,8 @@ class TaskExecutor:
     ) -> ReviewResult:
         """Structural guard + Reviewer on THIS task's increment (shared by the round
         gate and the Writer's inline request_review tool)."""
-        # deterministic structural guard first (a clobber/syntax/shrink is a hard reject).
+        # Deterministic, recoverable review findings first. These reject the current
+        # Writer hand-off and request a local fix; they are not run-level hard stops.
         if config.structural_guard and config.worktree is not None:
             findings = await self._structural_findings(
                 config.worktree,
@@ -240,17 +260,27 @@ class TaskExecutor:
             if findings:
                 return ReviewResult(verdict="revise", findings=findings,
                                     summary="Structural guard rejected the edit.")
-        # the Reviewer sees the body (worker output or the Writer's note) + the diff.
-        review_input = body_text
+        # The task-scoped Git diff is the authoritative Writer hand-off. The final
+        # Writer text is optional context and never needs a schema.
+        note = body_text.strip()
+        review_parts: list[str] = []
+        if note and note != "(no output)":
+            review_parts.append(f"Optional Writer note (not evidence):\n{note}")
         if config.worktree is not None and task_start is not None:
             diff = await config.worktree.diff_since(task_start)
-            review_input += f"\n\n--- diff (this task) ---\n{diff}"
+            review_parts.append(f"Authoritative Git diff (this task only):\n{diff}")
+        review_input = "\n\n".join(review_parts) or "Authoritative Git diff: (empty)"
         review_tree = (
             await config.worktree.snapshot()
             if config.worktree is not None
             else None
         )
-        review = await self.reviewer.review(task=brief, result=review_input)
+        review = None
+        for _handoff_try in range(config.max_handoff_retries + 1):
+            review = await self.reviewer.review(task=brief, result=review_input)
+            if not getattr(review, "handoff_failed", False):
+                break
+        assert review is not None
         if config.worktree is not None and review_tree is not None:
             after_review = await config.worktree.snapshot()
             if after_review != review_tree:
@@ -261,6 +291,19 @@ class TaskExecutor:
                     "Reviewer mutated the candidate while verifying it; the mutation was "
                     f"discarded. Use read-only checks.\n{mutation[:2000]}",
                 )
+        if getattr(review, "handoff_failed", False):
+            return ReviewResult(
+                verdict="escalate",
+                findings=[
+                    Finding(
+                        severity="major",
+                        location=location,
+                        description=review.feedback,
+                        required_fix="Retry the producing component output; do not edit code.",
+                    )
+                ],
+                summary=review.feedback,
+            )
         return self._to_review(review, location=location)
 
     def _request_review_tool(
@@ -336,22 +379,6 @@ class TaskExecutor:
         Scoped to files changed since `since` (this task) when given."""
         findings: list[Finding] = []
         changed = await (worktree.changed_since(since) if since else worktree.changed_paths())
-        outside = _outside_declared_scope(changed, declared_scope or [])
-        if outside:
-            findings.append(
-                Finding(
-                    severity="blocker",
-                    location=", ".join(outside),
-                    description=(
-                        "Task diff exceeds its frozen Affected components: "
-                        + ", ".join(outside)
-                    ),
-                    required_fix=(
-                        "Revert every out-of-scope file while preserving only the "
-                        "authorized task files."
-                    ),
-                )
-            )
         for rel in changed:
             if not rel.endswith(".py"):
                 continue
@@ -364,7 +391,7 @@ class TaskExecutor:
             marker = next((m for m in _PLACEHOLDER_MARKERS if m in src), None)
             if marker is not None:
                 findings.append(Finding(
-                    severity="blocker", location=rel,
+                    severity="major", location=rel,
                     description=f"{rel} contains an elision placeholder ({marker!r}). "
                     "Never abbreviate code — use edit_file for the target lines only.",
                     required_fix="Restore the full file and edit it with edit_file, "
@@ -377,30 +404,22 @@ class TaskExecutor:
                 compile(src, rel, "exec")
             except SyntaxError as exc:
                 findings.append(Finding(
-                    severity="blocker", location=rel,
+                    severity="major", location=rel,
                     description=f"{rel} no longer parses: {exc.msg} (line {exc.lineno}).",
                     required_fix="Fix the syntax; keep the rest of the file intact.",
                 ))
                 continue
 
-            # check the line count didn't drop drastically (an overwrite dropped code).
-            base = await worktree.read_base(rel)
-            if base is not None:
-                base_lines, now_lines = base.count("\n") + 1, src.count("\n") + 1
-                if base_lines >= 20 and now_lines < base_lines * 0.5:
-                    findings.append(Finding(
-                        severity="blocker", location=rel,
-                        description=f"{rel} shrank from {base_lines} to {now_lines} lines — "
-                        "likely an accidental overwrite that dropped existing code.",
-                        required_fix="Use edit_file to change only what the task needs.",
-                    ))
         return findings
 
     def _to_review(self, review: Any, *, location: str) -> ReviewResult:
         """Adapt the Reviewer's approved/feedback verdict into a ReviewResult."""
         # an explicit approval accepts; anything else is a revise with a finding.
         if getattr(review, "approved", False):
-            return ReviewResult(verdict="accept", summary="Reviewer approved the change.")
+            return ReviewResult(
+                verdict="accept",
+                summary=getattr(review, "feedback", "") or "Reviewer approved the change.",
+            )
         raw = getattr(review, "feedback", "") or "Rejected without specific feedback."
         return _revise(location, raw.strip())
 

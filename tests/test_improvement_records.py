@@ -63,6 +63,8 @@ def test_context_keeps_target_and_reforge_histories_separate(tmp_path):
             "run_id": "target-1",
             "type": "target_run_started",
             "task_prompt": "implement multiply",
+            "evidence_source": "baseline",
+            "target_commit": "abc",
         },
         {
             "run_id": "target-1",
@@ -85,21 +87,28 @@ def test_context_keeps_target_and_reforge_histories_separate(tmp_path):
             )
         ],
         completed=True,
+        achievements=["structured planning: the agent creates an explicit plan"],
     )
 
     context = OrchestratorContextBuilder(str(tmp_path)).build(
         intent="improve the coder",
         target_trajectory=target_records,
         previous_reforge_loops=[loop],
-        run_manifest={"run_id": "reforge-1"},
+        run_manifest={"run_id": "reforge-1", "loop_base": "abc"},
     )
 
     assert context.target_agent_runs[0].run_id == "target-1"
     assert context.target_agent_runs[0].task_prompt == "implement multiply"
+    assert context.target_agent_runs[0].evidence_source == "baseline"
+    assert context.target_agent_runs[0].target_commit == "abc"
+    assert context.target_agent_runs[0].is_current
     assert context.previous_reforge_loops[0].loop_id == "reforge-1/loop_0"
     assert context.previous_reforge_loops[0].component_status == {
         "orchestrator": "proceed"
     }
+    assert context.previous_reforge_loops[0].achievements == [
+        "structured planning: the agent creates an explicit plan"
+    ]
     assert context.raw_reforge_loops["reforge-1/loop_0"].run_id == "reforge-1"
     serialized = context.model_dump(mode="json")
     assert "raw_target_evidence" not in serialized
@@ -125,6 +134,30 @@ def test_target_summary_uses_stable_evidence_references():
     assert summaries[0].evidence_refs == ["target-1:event:4"]
     assert evidence[0]["trajectory_kind"] == "target_agent"
     assert evidence[0]["arguments"] == {"pattern": "plan"}
+
+
+def test_target_summary_marks_only_current_commit_evidence_current():
+    summaries, _ = summarize_target_trajectory(
+        [
+            {
+                "run_id": "baseline",
+                "type": "target_run_started",
+                "target_commit": "old",
+                "evidence_source": "baseline",
+            },
+            {
+                "run_id": "delivered",
+                "type": "target_run_started",
+                "target_commit": "new",
+                "evidence_source": "delivered_scenario",
+            },
+        ],
+        current_commit="new",
+    )
+
+    by_id = {summary.run_id: summary for summary in summaries}
+    assert not by_id["baseline"].is_current
+    assert by_id["delivered"].is_current
 
 
 def test_record_store_writes_run_loop_and_diff(tmp_path):

@@ -52,6 +52,7 @@ def make_proposal(**overrides) -> ImprovementProposal:
                 command="python3 -m pytest tests/test_agent.py",
             ),
         ],
+        "delivery_run": ["python3 -c \"print('smoke ok')\""],
     }
     values.update(overrides)
     return ImprovementProposal(**values)
