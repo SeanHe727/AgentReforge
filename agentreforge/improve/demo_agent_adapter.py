@@ -106,7 +106,18 @@ def run_scenario(
         {
             "type": "done",
             "sequence": sequence + 1,
-            "outcome": "completed",
+            "outcome": (
+                "incomplete"
+                if any(
+                    marker in final.casefold()
+                    for marker in (
+                        "reached max steps",
+                        "maximum steps reached",
+                        "step budget exhausted",
+                    )
+                )
+                else "completed"
+            ),
             "final_response": final,
         },
     )

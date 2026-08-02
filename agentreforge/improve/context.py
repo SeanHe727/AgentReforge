@@ -54,6 +54,12 @@ _MAX_REPO_FILES = 250
 _MAX_RESPONSE = 2_000
 _MAX_EVIDENCE_CONTENT = 800
 _MAX_EVIDENCE_RECORDS = 80
+_TARGET_RUN_SEMANTICS = (
+    "Each target_agent_run is a trial of target_commit on a disposable task "
+    "workspace. The generated artifact and its external evaluation are evidence "
+    "about that target agent version, even when task files differ from the target "
+    "agent repository."
+)
 
 
 class RepositoryContext(BaseModel):
@@ -70,6 +76,7 @@ class OrchestratorContext(BaseModel):
     """Everything that must be present before Orchestrator reasoning starts."""
 
     improvement_intent: str
+    target_run_semantics: str = _TARGET_RUN_SEMANTICS
     target_agent_runs: list[TargetRunSummary] = Field(default_factory=list)
     # AgentReforge's own history; never mixed into target_agent_runs.
     previous_reforge_loops: list[ReforgeLoopSummary] = Field(default_factory=list)
@@ -179,7 +186,12 @@ def summarize_target_trajectory(
     for run_id, events in grouped.items():
         task_prompt = ""
         final_response = ""
-        outcome = "unknown"
+        reported_outcome = "unknown"
+        saw_error = False
+        stopped_early = False
+        step_budget_exhausted = False
+        evaluation_passed: bool | None = None
+        evaluation_summary = ""
         tools: list[str] = []
         tool_errors = 0
         errors: list[str] = []
@@ -204,16 +216,30 @@ def summarize_target_trajectory(
                 tool_errors += int(normalized_error)
             elif event_type == "error":
                 errors.append(str(event.get("error") or "unknown error"))
-                outcome = "error"
+                saw_error = True
             elif event_type == "evaluation_result":
-                if not bool(event.get("passed")):
-                    errors.append(
-                        str(event.get("content") or "external verification failed")
-                    )
-                    outcome = "failed_verification"
+                evaluation_passed = bool(event.get("passed"))
+                evaluation_summary = str(
+                    event.get("content") or "external verification returned no details"
+                )[:_MAX_EVIDENCE_CONTENT]
+                if not evaluation_passed:
+                    errors.append(evaluation_summary)
             elif event_type == "done":
                 final_response = str(event.get("final_response") or final_response)
-                outcome = str(event.get("outcome") or "completed")
+                reported_outcome = str(event.get("outcome") or "completed")
+                normalized_response = final_response.casefold()
+                step_budget_exhausted = any(
+                    marker in normalized_response
+                    for marker in (
+                        "reached max steps",
+                        "maximum steps reached",
+                        "step budget exhausted",
+                    )
+                )
+                stopped_early = step_budget_exhausted or reported_outcome in {
+                    "incomplete",
+                    "stopped",
+                }
 
             if event_type in {
                 "target_run_started",
@@ -249,12 +275,25 @@ def summarize_target_trajectory(
                     }
                 )
 
+        if saw_error:
+            outcome = "error"
+        elif evaluation_passed is False:
+            outcome = "failed_verification"
+        elif stopped_early:
+            outcome = "incomplete"
+        else:
+            outcome = reported_outcome
+
         summaries.append(
             TargetRunSummary(
                 run_id=run_id,
                 task_prompt=task_prompt,
                 outcome=outcome,
                 final_response=final_response[:_MAX_RESPONSE],
+                stopped_early=stopped_early,
+                step_budget_exhausted=step_budget_exhausted,
+                evaluation_passed=evaluation_passed,
+                evaluation_summary=evaluation_summary,
                 tool_calls=len(tools),
                 tool_errors=tool_errors,
                 tools_used=list(dict.fromkeys(tools)),

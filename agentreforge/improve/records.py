@@ -30,7 +30,15 @@ class TargetRunSummary(BaseModel):
     run_id: str
     task_prompt: str = ""
     outcome: str = "unknown"
+    # A target run executes one version of the agent against a disposable task
+    # workspace. Artifact success/failure is therefore capability evidence
+    # about ``target_commit``, not history from a different product.
+    evidence_scope: str = "target_agent_on_task_workspace"
     final_response: str = ""
+    stopped_early: bool = False
+    step_budget_exhausted: bool = False
+    evaluation_passed: bool | None = None
+    evaluation_summary: str = ""
     tool_calls: int = 0
     tool_errors: int = 0
     tools_used: list[str] = Field(default_factory=list)

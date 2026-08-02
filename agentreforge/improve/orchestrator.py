@@ -35,7 +35,9 @@ ORCHESTRATOR_PROMPT = """You are the improvement Orchestrator: an analyst, not a
 You receive two strictly separated histories:
 1. `target_agent_runs`: what the TARGET AGENT was asked to do and how it behaved.
    Use these runs to diagnose what capability should improve. Every run is tagged
-   with `target_commit`, `evidence_source`, and `is_current`.
+   with `target_commit`, `evidence_source`, and `is_current`. Read its structured
+   `outcome`, `stopped_early`, `step_budget_exhausted`, `evaluation_passed`, and
+   `evaluation_summary` fields before interpreting free-form response text.
 2. `previous_reforge_loops`: what AgentReforge itself planned, wrote, reviewed,
    delivered, and committed earlier in THIS recursive run. Use these to avoid
    repetition and plan the next improvement. Never treat Reforge workflow events as

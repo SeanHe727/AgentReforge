@@ -299,9 +299,31 @@ def test_external_evaluation_failure_is_separate_target_evidence():
     )
 
     assert summaries[0].outcome == "failed_verification"
+    assert summaries[0].evaluation_passed is False
+    assert summaries[0].evaluation_summary == "real CLI invocation failed"
+    assert summaries[0].evidence_scope == "target_agent_on_task_workspace"
     assert summaries[0].error_messages == ["real CLI invocation failed"]
     assert evidence[-1]["type"] == "evaluation_result"
     assert evidence[-1]["is_error"] is True
+
+
+def test_target_summary_recovers_incomplete_outcome_from_legacy_step_budget_text():
+    summaries, _ = summarize_target_trajectory(
+        [
+            {
+                "run_id": "budget-exhausted",
+                "type": "done",
+                # Historical adapters incorrectly wrote completed here.
+                "outcome": "completed",
+                "final_response": "(stopped: reached max steps)",
+            }
+        ]
+    )
+
+    summary = summaries[0]
+    assert summary.outcome == "incomplete"
+    assert summary.stopped_early
+    assert summary.step_budget_exhausted
 
 
 def test_target_summary_marks_only_current_commit_evidence_current():
