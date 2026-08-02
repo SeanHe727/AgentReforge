@@ -41,6 +41,9 @@ You receive two strictly separated histories:
    `current_run_alerts` is a compact attention index of unresolved outcomes on the
    current target commit. It is not a ranking gate, but every alert requires an
    explicit diagnosis or evidence-based disposition before selection.
+   `current_target_commit`, `current_run_ids`, and `non_current_run_ids` are
+   deterministic Git-identity facts. Never relabel a listed current run as another
+   agent version, and never call a listed non-current run current evidence.
 2. `previous_reforge_loops`: what AgentReforge itself planned, wrote, reviewed,
    delivered, and committed earlier in THIS recursive run. Use these to avoid
    repetition and plan the next improvement. Never treat Reforge workflow events as

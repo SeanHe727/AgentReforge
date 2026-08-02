@@ -153,6 +153,9 @@ def test_context_keeps_target_and_reforge_histories_separate(tmp_path):
     assert context.target_agent_runs[0].evidence_source == "baseline"
     assert context.target_agent_runs[0].target_commit == "abc"
     assert context.target_agent_runs[0].is_current
+    assert context.current_target_commit == "abc"
+    assert context.current_run_ids == ["target-1"]
+    assert context.non_current_run_ids == []
     assert context.current_run_alerts == []
     assert context.previous_reforge_loops[0].loop_id == "reforge-1/loop_0"
     assert context.previous_reforge_loops[0].component_status == {
@@ -414,9 +417,14 @@ def test_context_surfaces_current_terminal_run_as_attention_alert(tmp_path):
         "current-failure"
     ]
     alert = context.current_run_alerts[0]
+    assert alert.target_commit == "1cf783bac54572c3ac4b8749d3cc088f7f3c85e7"
+    assert alert.is_current
+    assert "current target agent commit" in alert.capability_evidence_statement
     assert alert.outcome == "failed_verification"
     assert alert.step_budget_exhausted
     assert alert.evaluation_passed is False
+    assert context.current_run_ids == ["current-failure"]
+    assert context.non_current_run_ids == ["stale-failure"]
 
 
 def test_record_store_writes_run_loop_and_diff(tmp_path):

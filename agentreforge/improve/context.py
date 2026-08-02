@@ -94,6 +94,9 @@ class CurrentRunAlert(BaseModel):
     """A salient factual index of unresolved evidence on the current commit."""
 
     run_id: str
+    target_commit: str
+    is_current: bool = True
+    capability_evidence_statement: str
     outcome: str
     task_prompt: str
     step_budget_exhausted: bool
@@ -107,6 +110,9 @@ class OrchestratorContext(BaseModel):
 
     improvement_intent: str
     target_run_semantics: str = _TARGET_RUN_SEMANTICS
+    current_target_commit: str = ""
+    current_run_ids: list[str] = Field(default_factory=list)
+    non_current_run_ids: list[str] = Field(default_factory=list)
     target_agent_runs: list[TargetRunSummary] = Field(default_factory=list)
     # This is an attention index, not a policy gate or ranking decision. It
     # prevents terminal current-version evidence from being buried beneath
@@ -156,10 +162,20 @@ class OrchestratorContextBuilder:
         loop_summaries = [_summarize_reforge_loop(loop) for loop in previous_reforge_loops]
         return OrchestratorContext(
             improvement_intent=intent,
+            current_target_commit=str(run_manifest.get("loop_base") or ""),
+            current_run_ids=[summary.run_id for summary in summaries if summary.is_current],
+            non_current_run_ids=[
+                summary.run_id for summary in summaries if not summary.is_current
+            ],
             target_agent_runs=summaries,
             current_run_alerts=[
                 CurrentRunAlert(
                     run_id=summary.run_id,
+                    target_commit=summary.target_commit,
+                    capability_evidence_statement=(
+                        "This task-workspace outcome is capability evidence about "
+                        "the current target agent commit."
+                    ),
                     outcome=summary.outcome,
                     task_prompt=summary.task_prompt,
                     step_budget_exhausted=summary.step_budget_exhausted,
