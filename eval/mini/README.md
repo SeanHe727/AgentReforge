@@ -4,9 +4,9 @@ This is the fast, deterministic evaluation for the early AgentReforge workflow.
 It complements the larger, LLM-judged greenfield suite in `eval/problems.py`.
 
 The benchmark copies a small brownfield starter repository into an isolated
-solution directory, asks each coder version to implement the same task with the
+solution directory, asks each `demo_agent` version to implement the same task with the
 same model and step budget, and then executes a hidden `unittest` file that was
-not present in the coder's working directory.
+not present in the demo agent's working directory.
 
 Current cases:
 

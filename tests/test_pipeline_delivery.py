@@ -494,6 +494,6 @@ def test_repair_instruction_includes_output_assertion_failures_with_exit_zero():
 
     instruction = _repair_instruction(delivery)
 
-    assert "AcceptanceRunner failures" in instruction
+    assert "Universal execution failures" in instruction
     assert "ac1: output missing 'verify'" in instruction
     assert "Deliverer goal review" not in instruction

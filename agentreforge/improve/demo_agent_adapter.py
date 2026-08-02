@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .trajectory import tool_result_is_error
+
 _CONTENT_CAP = 2_000
 _ARGUMENT_CAP = 2_000
 _SENSITIVE_KEYS = {"api_key", "authorization", "password", "secret", "token"}
@@ -78,7 +80,7 @@ def run_scenario(
                 "sequence": sequence,
                 "name": name,
                 "arguments": _safe_arguments(arguments),
-                "is_error": result.startswith("error:"),
+                "is_error": tool_result_is_error(result),
                 "content": result[:_CONTENT_CAP],
             },
         )

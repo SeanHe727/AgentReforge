@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 from conftest import make_proposal
@@ -222,7 +223,7 @@ def test_demo_agent_adapter_collects_real_tool_trajectory(tmp_path):
         "    if name == 'read_file': return (root / args['path']).read_text()\n"
         "    if name == 'write_file':\n"
         "        (root / args['path']).write_text(args['content']); return 'wrote'\n"
-        "    if name == 'run_bash': return '(exit 0) OK'\n"
+        "    if name == 'run_bash': return '(exit 127) command not found'\n"
         "    return 'error: unknown'\n"
         "def run_task(prompt, cwd):\n"
         "    execute('list_dir', {'path': '.'}, cwd)\n"
@@ -265,6 +266,7 @@ def test_demo_agent_adapter_collects_real_tool_trajectory(tmp_path):
         "write_file",
         "run_bash",
     ]
+    assert scenario.trajectory[-2]["is_error"] is True
     assert scenario.trajectory_available
 
 
@@ -334,7 +336,7 @@ def test_goal_review_message_includes_diff_and_authoritative_runner_output():
                     symptom="no navigation",
                     root_cause="missing tools",
                     capability_gap="repository awareness",
-                    evidence_refs=["coder/tools.py"],
+                    evidence_refs=["demo_agent/tools.py"],
                 )
             ],
             candidates=[
@@ -358,7 +360,7 @@ def test_goal_review_message_includes_diff_and_authoritative_runner_output():
                 command=[
                     "python3",
                     "-m",
-                    "coder",
+                    "demo_agent",
                     "{prompt}",
                     "--dir",
                     "{workspace}",
@@ -370,14 +372,20 @@ def test_goal_review_message_includes_diff_and_authoritative_runner_output():
 
     acceptance = AcceptanceRun(
         passed=True,
-        runs=[RunResult("python3 -m coder --smoke", 0, "agent started\nobjective reached")],
+        runs=[
+            RunResult(
+                "python3 -m demo_agent --smoke",
+                0,
+                "agent started\nobjective reached",
+            )
+        ],
         scenario_runs=[
             ScenarioRunResult(
                 scenario_id="navigation",
                 prompt="locate the model client",
-                command=["python3", "-m", "coder", "locate the model client"],
+                command=["python3", "-m", "demo_agent", "locate the model client"],
                 exit_code=0,
-                output="found coder/llm.py",
+                output="found demo_agent/llm.py",
                 trajectory=[{"type": "tool_result", "name": "search_code"}],
                 trajectory_available=True,
             )
@@ -385,19 +393,19 @@ def test_goal_review_message_includes_diff_and_authoritative_runner_output():
     )
     message = goal_review_message(
         proposal,
-        "diff --git a/coder/tools.py",
+        "diff --git a/demo_agent/tools.py",
         acceptance,
     )
 
     assert "navigation tools" in message
     assert "wire tools into the active tool surface" in message
     assert "new tools are wired into the active agent loop" in message
-    assert "diff --git a/coder/tools.py" in message
-    assert "python3 -m coder --smoke" in message
+    assert "diff --git a/demo_agent/tools.py" in message
+    assert "python3 -m demo_agent --smoke" in message
     assert '"exit_code": 0' in message
     assert "objective reached" in message
     assert "locate the model client" in message
-    assert "found coder/llm.py" in message
+    assert "found demo_agent/llm.py" in message
     assert "search_code" in message
 
 
@@ -458,7 +466,7 @@ def test_deliverer_rejects_missing_required_trajectory_before_llm():
                 command=[
                     "python3",
                     "-m",
-                    "coder",
+                    "demo_agent",
                     "{prompt}",
                     "--dir",
                     "{workspace}",
@@ -480,7 +488,7 @@ def test_deliverer_rejects_missing_required_trajectory_before_llm():
                     ScenarioRunResult(
                         scenario_id="ordered-tools",
                         prompt="inspect, edit, then verify",
-                        command=["python3", "-m", "coder"],
+                        command=["python3", "-m", "demo_agent"],
                         exit_code=0,
                         output="I inspected and verified the change.",
                         changed_files=["app.py"],
@@ -560,6 +568,100 @@ def test_delivery_coordinator_requires_both_runner_and_deliverer():
     assert fake_deliverer.acceptance.failures == ["test failed"]
     assert "test failed" in result.reasons
     assert result.goal_review.startswith("GOAL: ACHIEVED")
+
+
+def test_agentic_deliverer_chooses_and_runs_a_frozen_scenario(tmp_path):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, *, system_prompt):
+            self.calls += 1
+            if self.calls == 1:
+                assert any(
+                    tool["function"]["name"] == "run_delivery_scenario"
+                    for tool in tools
+                )
+                yield {
+                    "type": "tool_call_delta",
+                    "tool_call": {
+                        "index": 0,
+                        "id": "scenario_call",
+                        "function": {
+                            "name": "run_delivery_scenario",
+                            "arguments": json.dumps({"scenario_id": "actual-run"}),
+                        },
+                    },
+                }
+                return
+            yield {
+                "type": "text_delta",
+                "text": (
+                    '{"ready": true, "failure_kind": "none", '
+                    '"missing_objectives": [], "integration_concerns": [], '
+                    '"proposal_violations": [], "blocking_evidence": [], '
+                    '"summary": "observed the frozen target path"}'
+                ),
+            }
+
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="actual-run",
+                prompt="Observe the target entry point.",
+                command=["python3", "-c", "print('observed target')"],
+            )
+        ],
+    )
+    client = Client()
+
+    result = asyncio.run(
+        DeliveryCoordinator(
+            runner=AcceptanceRunner(timeout_s=10),
+            deliverer=Deliverer(client=client),
+        ).deliver(
+            proposal,
+            cwd=str(tmp_path),
+            loop_diff="diff --git a/agent.py b/agent.py",
+        )
+    )
+
+    assert result.passed
+    assert result.goal_accepted
+    assert client.calls == 2
+    assert result.scenario_runs[0].scenario_id == "actual-run"
+    assert result.scenario_runs[0].output.strip() == "observed target"
+
+
+def test_agentic_deliverer_cannot_accept_without_running_the_target(tmp_path):
+    class Client:
+        async def chat(self, messages, tools=None, *, system_prompt):
+            yield {
+                "type": "text_delta",
+                "text": (
+                    '{"ready": true, "failure_kind": "none", '
+                    '"missing_objectives": [], "integration_concerns": [], '
+                    '"proposal_violations": [], "blocking_evidence": [], '
+                    '"summary": "looks fine"}'
+                ),
+            }
+
+    result = asyncio.run(
+        DeliveryCoordinator(
+            runner=AcceptanceRunner(timeout_s=10),
+            deliverer=Deliverer(client=Client()),
+        ).deliver(
+            make_proposal(),
+            cwd=str(tmp_path),
+            loop_diff="diff --git a/agent.py b/agent.py",
+        )
+    )
+
+    assert not result.passed
+    assert not result.goal_accepted
+    assert result.failure_kind == "verification_gap"
+    assert "without executing any frozen runtime action" in result.goal_review
 
 
 def test_delivery_coordinator_records_judged_root_cause():

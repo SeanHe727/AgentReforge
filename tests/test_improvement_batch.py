@@ -22,7 +22,7 @@ def _analysis(*, selected: list[str], efforts: tuple[int, int] = (2, 2)):
                 symptom="the target guesses repository structure",
                 root_cause="the observation tools are incomplete",
                 capability_gap="repository navigation",
-                evidence_refs=["coder/tools.py:1"],
+                evidence_refs=["demo_agent/tools.py:1"],
             )
         ],
         candidates=[
@@ -36,7 +36,7 @@ def _analysis(*, selected: list[str], efforts: tuple[int, int] = (2, 2)):
             InterventionCandidate(
                 name="concise tool guidance",
                 level="prompt",
-                mechanism="tell the coder when to inspect before editing",
+                mechanism="tell demo_agent when to inspect before editing",
                 expected_capability_delta="more consistent tool use",
                 effort=efforts[1],
             ),
@@ -49,7 +49,7 @@ def _analysis(*, selected: list[str], efforts: tuple[int, int] = (2, 2)):
         compatibility_notes=["the prompt consumes the tool surface without conflicting writes"],
         selection_reason="highest benefit per effort",
         causal_mechanism="add observation capability and teach the active agent to use it",
-        expected_capability_delta="the coder inspects relevant source before editing",
+        expected_capability_delta="demo_agent inspects relevant source before editing",
     )
 
 

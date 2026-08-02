@@ -1,7 +1,7 @@
-"""Run a demo-coder version on a problem, then LLM-grade its solution.
+"""Run a demo_agent version on a problem, then LLM-grade its solution.
 
-A "version" is just a path to a coder repo (baseline, or an improved worktree), so
-the same code compares any version. The coder runs as a SUBPROCESS in that repo
+A "version" is just a path to the demo repo (baseline, or an improved worktree), so
+the same code compares any version. The demo agent runs as a subprocess in that repo
 with a fixed model, writing its solution into an isolated work dir; the grader is a
 separate strong-model LLM call scoring the produced files against the rubric.
 """
@@ -20,13 +20,13 @@ _BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 
 def solve_problem(agent_repo: str, problem: dict, work_dir: str, *, max_steps: int = 15) -> str:
-    """Run the coder at agent_repo on the problem, writing code into work_dir."""
+    """Run demo_agent at agent_repo on the problem, writing code into work_dir."""
     # absolute: the agent subprocess runs with cwd=agent_repo, so a relative --dir
     # would land inside the agent repo, not here.
     work = str(Path(work_dir).resolve())
     Path(work).mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
-        [sys.executable, "-m", "coder", problem["prompt"], "--dir", work,
+        [sys.executable, "-m", "demo_agent", problem["prompt"], "--dir", work,
          "--max-steps", str(max_steps)],
         cwd=agent_repo, capture_output=True, text=True, timeout=600,
     )

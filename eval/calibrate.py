@@ -1,4 +1,4 @@
-"""Calibrate problem difficulty: run the BASELINE demo coder on every problem and
+"""Calibrate problem difficulty: run the baseline demo_agent on every problem and
 grade it. High baseline scores => problems too easy (no headroom); make them harder.
 """
 
@@ -13,7 +13,7 @@ from .problems import problems
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--agent", required=True, help="path to the baseline coder repo")
+    ap.add_argument("--agent", required=True, help="path to the baseline demo-agent repo")
     ap.add_argument("--work", required=True, help="dir to write solutions into")
     ap.add_argument("--max-steps", type=int, default=15)
     args = ap.parse_args()

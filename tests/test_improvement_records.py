@@ -6,12 +6,20 @@ import json
 from agentreforge.improve.context import OrchestratorContextBuilder, summarize_target_trajectory
 from agentreforge.improve.history_index import ImprovementHistoryIndex
 from agentreforge.improve.records import (
+    CapabilityCompletionScope,
     ComponentRecord,
     ImprovementRecordStore,
     RecursiveRunRecord,
     ReforgeLoopRecord,
 )
-from agentreforge.improve.trajectory import load_trajectory, log_target_trajectory
+from agentreforge.improve.trajectory import (
+    append_target_trajectory,
+    list_trajectories,
+    load_trajectory,
+    log_target_trajectory,
+    tool_result_is_error,
+)
+from agentreforge.snapshot.service import _project_key
 from agentreforge.types import Message
 
 
@@ -53,6 +61,49 @@ def test_target_trajectory_records_prompt_arguments_and_final_response(tmp_path)
     assert records[1]["arguments"]["path"] == "agent.py"
     assert records[1]["arguments"]["api_key"] == "[REDACTED]"
     assert records[2]["final_response"] == "finished"
+    history_files = list((tmp_path / "traces").rglob("*.jsonl"))
+    assert [path.name for path in history_files] == ["trajectory.jsonl"]
+
+    append_target_trajectory(
+        str(tmp_path),
+        [
+            {
+                "session_id": "target-2",
+                "run_id": "target-2",
+                "type": "done",
+                "outcome": "completed",
+            }
+        ],
+        store_root=tmp_path / "traces",
+    )
+    assert list_trajectories(
+        str(tmp_path), store_root=tmp_path / "traces"
+    ) == ["target-2", "target-1"]
+    assert load_trajectory(
+        str(tmp_path), "target-2", store_root=tmp_path / "traces"
+    )[0]["outcome"] == "completed"
+
+
+def test_legacy_per_session_trajectory_is_imported_once(tmp_path):
+    store = tmp_path / "traces"
+    project = store / _project_key(tmp_path.resolve())
+    project.mkdir(parents=True)
+    legacy = project / "old-session.jsonl"
+    legacy.write_text(
+        '{"session_id":"old-session","run_id":"old-session","type":"done"}\n',
+        encoding="utf-8",
+    )
+
+    first = load_trajectory(
+        str(tmp_path), "old-session", store_root=store
+    )
+    second = load_trajectory(
+        str(tmp_path), "old-session", store_root=store
+    )
+
+    assert len(first) == 1
+    assert second == first
+    assert (project / "trajectory.jsonl").is_file()
 
 
 def test_context_keeps_target_and_reforge_histories_separate(tmp_path):
@@ -117,6 +168,69 @@ def test_context_keeps_target_and_reforge_histories_separate(tmp_path):
     assert "main.py" in context.repository.entrypoints
 
 
+def test_context_reconstructs_dynamic_backlog_with_precise_completion_scope(tmp_path):
+    delivered = ReforgeLoopRecord(
+        run_id="reforge-1",
+        loop_id="reforge-1/loop_0",
+        loop=0,
+        base_commit="abc",
+        stage="delivered",
+        completed=True,
+        diagnosis={
+            "candidates": [
+                {
+                    "name": "confined repository search",
+                    "capability_gap": "cannot discover files below the workspace",
+                    "mechanism": "add a confined recursive search tool",
+                    "expected_capability_delta": "find relevant nested source files",
+                    "evidence_refs": ["baseline:event:2"],
+                    "rejected_reason": "",
+                },
+                {
+                    "name": "planning guidance",
+                    "capability_gap": "edits before inspecting",
+                    "mechanism": "add inspect-before-edit guidance",
+                    "expected_capability_delta": "inspect relevant files first",
+                    "rejected_reason": "lower causal confidence",
+                },
+            ],
+            "selected_candidates": ["confined repository search"],
+        },
+        completion_scopes=[
+            CapabilityCompletionScope(
+                candidate="confined repository search",
+                capability_gap="cannot discover files below the workspace",
+                mechanism="add a confined recursive search tool",
+                expected_capability_delta="find relevant nested source files",
+                evidence_scope=["nested-search"],
+                verification_level="behavior_verified",
+            )
+        ],
+    )
+
+    context = OrchestratorContextBuilder(str(tmp_path)).build(
+        intent="improve the coder",
+        target_trajectory=[],
+        previous_reforge_loops=[delivered],
+        run_manifest={"run_id": "reforge-1", "loop_base": "def"},
+    )
+
+    by_name = context.improvement_backlog
+    assert by_name["confined repository search"].status == "behavior_verified"
+    assert (
+        by_name["confined repository search"].diagnosis.capability_gap
+        == "cannot discover files below the workspace"
+    )
+    assert by_name["confined repository search"].history.verification_scope == [
+        "nested-search"
+    ]
+    assert by_name["planning guidance"].status == "deferred"
+    assert (
+        by_name["planning guidance"].history.disposition_reason
+        == "lower causal confidence"
+    )
+
+
 def test_target_summary_uses_stable_evidence_references():
     summaries, evidence = summarize_target_trajectory(
         [
@@ -134,6 +248,28 @@ def test_target_summary_uses_stable_evidence_references():
     assert summaries[0].evidence_refs == ["target-1:event:4"]
     assert evidence[0]["trajectory_kind"] == "target_agent"
     assert evidence[0]["arguments"] == {"pattern": "plan"}
+
+
+def test_nonzero_string_exit_is_normalized_for_new_and_legacy_trajectory():
+    assert not tool_result_is_error("(exit 0)\nOK")
+    assert tool_result_is_error("(exit 127)\npython: command not found")
+    assert tool_result_is_error("error: missing file")
+
+    summaries, evidence = summarize_target_trajectory(
+        [
+            {
+                "run_id": "legacy",
+                "event_id": "legacy:event:1",
+                "type": "tool_result",
+                "name": "run_bash",
+                "content": "(exit 127)\npython: command not found",
+                "is_error": False,
+            }
+        ]
+    )
+
+    assert summaries[0].tool_errors == 1
+    assert evidence[0]["is_error"] is True
 
 
 def test_target_summary_marks_only_current_commit_evidence_current():

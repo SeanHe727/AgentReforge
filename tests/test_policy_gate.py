@@ -51,11 +51,11 @@ def test_postwrite_gate_accepts_directory_prefix_scope():
 
 
 def test_postwrite_gate_hard_denies_generated_artifacts_even_in_scope():
-    proposal = make_proposal(allowed_write_paths=["coder/"])
+    proposal = make_proposal(allowed_write_paths=["demo_agent/"])
 
     decision = evaluate_changes(
         proposal,
-        ["coder/agent.py", "coder/__pycache__/agent.cpython-312.pyc"],
+        ["demo_agent/agent.py", "demo_agent/__pycache__/agent.cpython-312.pyc"],
     )
 
     assert decision.decision == "deny"

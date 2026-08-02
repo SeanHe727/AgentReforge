@@ -2,7 +2,7 @@
 
 The improvement pipeline needs "how the agent actually behaved" as evidence
 (tool calls, errors, token use). Our event stream is otherwise ephemeral, so
-`log_trajectory` tees each event to a per-project JSONL trace file while passing
+`log_trajectory` tees each event to one per-project append-only JSONL history while passing
 it through to the normal consumer. The Orchestrator later reads these traces to
 ground proposals in concrete evidence.
 
@@ -10,13 +10,15 @@ This module records the TARGET AGENT, not AgentReforge's own workflow.  The
 separate AgentReforge run/loop audit lives in ``improve.records``.
 
 Records the original target task, observable tool arguments/results, final
-response, errors, and usage. Stored under ~/.agentreforge/traces/<project_key>/,
-isolated per project — reusing snapshot's project key so both agree on "which project".
+response, errors, and usage. Stored at
+``~/.agentreforge/traces/<project_key>/trajectory.jsonl`` and isolated per
+project. Every baseline run and delivered Loop scenario appends to this file.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,11 +29,54 @@ from ..snapshot.service import _project_key
 _MAX_CONTENT = 2000  # truncate tool output in traces to keep them small
 _MAX_ARGUMENT = 2000
 _SENSITIVE_KEYS = {"api_key", "authorization", "password", "secret", "token"}
+_EXIT_PREFIX = re.compile(r"^\s*\(exit\s+(-?\d+)\)")
+
+
+def tool_result_is_error(content: str, *, declared: bool = False) -> bool:
+    """Normalize legacy string tool results into one error contract."""
+
+    if declared or content.lstrip().casefold().startswith("error:"):
+        return True
+    match = _EXIT_PREFIX.match(content)
+    return bool(match and int(match.group(1)) != 0)
 
 
 def _trace_dir(cwd: str | Path, store_root: str | Path | None = None) -> Path:
     root = Path(store_root or Path.home() / ".agentreforge" / "traces")
     return root / _project_key(Path(cwd).resolve())
+
+
+def _history_path(cwd: str | Path, store_root: str | Path | None = None) -> Path:
+    directory = _trace_dir(cwd, store_root)
+    history = directory / "trajectory.jsonl"
+    if not history.exists():
+        _import_legacy_session_files(directory, history)
+    return history
+
+
+def _import_legacy_session_files(
+    directory: Path,
+    history: Path,
+) -> None:
+    """One-time import from the former per-session layout."""
+
+    sources = [
+        path
+        for path in sorted(directory.glob("*.jsonl"))
+        if path.name != history.name
+    ]
+    if not sources:
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    with history.open("a", encoding="utf-8") as destination:
+        for source in sources:
+            for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    destination.write(json.dumps(value, ensure_ascii=False) + "\n")
 
 
 async def log_trajectory(
@@ -62,10 +107,10 @@ async def log_target_trajectory(
     task_prompt: str = "",
     store_root: str | Path | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Tee one target-agent event stream into its own evidence record."""
+    """Append one target-agent event stream to the project's evidence history."""
 
     session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = _trace_dir(cwd, store_root) / f"{session_id}.jsonl"
+    path = _history_path(cwd, store_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         started = {
@@ -88,6 +133,23 @@ async def log_target_trajectory(
             yield event  # pass through to the original consumer
 
 
+def append_target_trajectory(
+    cwd: str | Path,
+    records: list[dict[str, Any]],
+    *,
+    store_root: str | Path | None = None,
+) -> None:
+    """Append already-materialized target evidence, such as delivered scenarios."""
+
+    if not records:
+        return
+    path = _history_path(cwd, store_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as destination:
+        for record in records:
+            destination.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _record(
     event: dict[str, Any], session_id: str, event_index: int = 0
 ) -> dict[str, Any] | None:
@@ -105,7 +167,10 @@ def _record(
         return base | {
             "name": event.get("name"),
             "arguments": _safe_arguments(event.get("arguments")),
-            "is_error": bool(event.get("is_error")),
+            "is_error": tool_result_is_error(
+                content,
+                declared=bool(event.get("is_error")),
+            ),
             "content": content[:_MAX_CONTENT],
         }
     if etype == "usage":
@@ -150,22 +215,38 @@ def _final_response(event: dict[str, Any]) -> str:
 def load_trajectory(
     cwd: str, session_id: str, store_root: str | Path | None = None
 ) -> list[dict[str, Any]]:
-    path = _trace_dir(cwd, store_root) / f"{session_id}.jsonl"
+    path = _history_path(cwd, store_root)
     if not path.exists():
         return []
     out = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             try:
-                out.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if str(record.get("session_id") or record.get("run_id") or "") == session_id:
+                out.append(record)
     return out
 
 
 def list_trajectories(cwd: str, store_root: str | Path | None = None) -> list[str]:
-    d = _trace_dir(cwd, store_root)
-    return sorted((p.stem for p in d.glob("*.jsonl")), reverse=True) if d.exists() else []
+    path = _history_path(cwd, store_root)
+    if not path.exists():
+        return []
+    newest_first: list[str] = []
+    seen: set[str] = set()
+    records = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in reversed(records):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        session_id = str(record.get("session_id") or record.get("run_id") or "")
+        if session_id and session_id not in seen:
+            seen.add(session_id)
+            newest_first.append(session_id)
+    return newest_first
 
 
 def load_recent_trajectory(

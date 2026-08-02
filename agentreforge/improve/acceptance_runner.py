@@ -1,4 +1,8 @@
-"""Deterministic delivery/commit gate for the frozen acceptance contract."""
+"""Trusted execution substrate used by the agentic Deliverer.
+
+The substrate starts frozen commands/scenarios, confines fixtures, and records
+facts.  It does not decide whether those facts prove the improvement goal.
+"""
 
 from __future__ import annotations
 
@@ -60,7 +64,11 @@ class ScenarioRunResult:
 
 @dataclass
 class AcceptanceRun:
-    """Authoritative Runner facts supplied to the Delivery Judge and commit gate."""
+    """Execution facts plus universal hard failures.
+
+    ``passed`` means only that no hard execution/safety failure was observed; it
+    is never evidence that the selected capability was realized.
+    """
 
     passed: bool
     runs: list[RunResult] = field(default_factory=list)
@@ -80,11 +88,38 @@ class AcceptanceRunner:
         self.approve_command = approve_command
         self.timeout_s = timeout_s
 
+    async def run_command(self, command: str, *, cwd: str) -> RunResult:
+        """Execute one frozen command selected by the Deliverer agent."""
+
+        return await self._safe_run(command, cwd)
+
+    async def run_scenario(
+        self,
+        scenario: DeliveryScenario,
+        *,
+        cwd: str,
+    ) -> ScenarioRunResult:
+        """Execute one frozen scenario selected by the Deliverer agent."""
+
+        return await self._safe_run_scenario(scenario, cwd)
+
+    async def run_safety_probe(self, safety: str, *, cwd: str) -> RunResult:
+        """Execute a system-owned universal safety probe."""
+
+        if safety == "path_confinement":
+            return await self._run_path_confinement_probe(cwd)
+        return RunResult(
+            f"adapter:safety:{safety}",
+            None,
+            f"unsupported system safety probe: {safety}",
+        )
+
     async def run(self, proposal: ImprovementProposal, *, cwd: str) -> AcceptanceRun:
-        commands = list(proposal.delivery_run)
+        scenarios = proposal.contract_delivery_scenarios()
+        commands = list(proposal.contract_delivery_run())
         commands = list(dict.fromkeys(commands))
         safety_properties = _required_safety_properties(proposal)
-        if not commands and not proposal.delivery_scenarios and not safety_properties:
+        if not commands and not scenarios and not safety_properties:
             return AcceptanceRun(
                 passed=False,
                 failures=["no executable acceptance command defined"],
@@ -95,7 +130,7 @@ class AcceptanceRunner:
             runs.append(await self._run_path_confinement_probe(cwd))
         scenario_runs = [
             await self._safe_run_scenario(scenario, cwd)
-            for scenario in proposal.delivery_scenarios
+            for scenario in scenarios
         ]
         failures = acceptance_failures(proposal, runs)
         failures.extend(
@@ -346,11 +381,11 @@ def _is_demo_agent_target(target: Path, argv: list[str]) -> bool:
 def _required_safety_properties(proposal: ImprovementProposal) -> set[str]:
     return {
         str(safety)
-        for task in proposal.tasks
+        for task in proposal.execution_tasks()
         for safety in task.required_safety_properties
     } | {
         str(safety)
-        for criterion in proposal.acceptance_criteria
+        for criterion in proposal.contract_acceptance_criteria()
         for safety in criterion.verified_safety_properties
     }
 
@@ -498,9 +533,10 @@ def acceptance_failures(
     proposal: ImprovementProposal,
     runs: list[RunResult],
 ) -> list[str]:
+    delivery_run = proposal.contract_delivery_run()
     failures = [
         f"delivery command {run.command!r}: exit {run.exit_code}, expected 0"
         for run in runs
-        if run.command in proposal.delivery_run and run.exit_code != 0
+        if run.command in delivery_run and run.exit_code != 0
     ]
     return failures

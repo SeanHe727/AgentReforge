@@ -118,7 +118,7 @@ class WriterReviewer:
         memory: Any = None,
         code_index: Any = None,
     ) -> ExecutionOutcome:
-        """Implement proposal.tasks in the worktree via the shared executor."""
+        """Implement the selected Change Contract via the shared executor."""
         cwd = str(worktree.path)
         system_prompt = system_prompt or PromptAssembler(
             cwd=cwd,
@@ -127,14 +127,19 @@ class WriterReviewer:
             tool_names=self.registry.list_names(),
         ).build()
 
-        # map the ImprovementTask DAG onto a plan; keep the richer specs by id.
-        specs: dict[str, ImprovementTask] = {t.id: t for t in proposal.tasks}
-        criteria = {criterion.id: criterion for criterion in proposal.acceptance_criteria}
+        # The executor still consumes a one-task plan internally.  The source of
+        # truth is the frozen Change Contract, exposed through compatibility views.
+        execution_tasks = proposal.execution_tasks()
+        specs: dict[str, ImprovementTask] = {t.id: t for t in execution_tasks}
+        criteria = {
+            criterion.id: criterion
+            for criterion in proposal.contract_acceptance_criteria()
+        }
         plan = ExecutionPlan(
             goal=proposal.summary,
             tasks={
                 t.id: Task(id=t.id, description=t.description, dependencies=list(t.dependencies))
-                for t in proposal.tasks
+                for t in execution_tasks
             },
         )
 

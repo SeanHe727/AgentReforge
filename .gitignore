@@ -13,5 +13,4 @@ __pycache__/
 dist/
 build/
 .agentreforge/
-demo-agent/
 eval/solutions/

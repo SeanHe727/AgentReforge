@@ -6,7 +6,7 @@ points to the code to judge.
 
 ## The setup
 
-- **Demo coder agent** (`demo-agent/coder/`): a real ReAct coding agent (gpt-5.4-mini +
+- **Demo coding agent** (`AgentReforge-demo/demo_agent/`): a real ReAct coding agent (gpt-5.4-mini +
   write/read/run_bash tools). Deliberately weak baseline: bare prompt, no planning, no
   self-verification, short step budget. This is the TARGET; AgentReforge edits its code.
 - **Test dataset** (`eval/problems.py`): 6 hard multi-file engineering problems
@@ -30,7 +30,7 @@ Baseline solutions: `eval/solutions/baseline/<problem_id>/`.
 
 ## What AgentReforge did
 
-`agent-reforge improve --cwd demo-agent -m gpt-5.4-mini --mode autonomous --level deep`.
+`agent-reforge improve --cwd /path/to/AgentReforge-demo -m gpt-5.4-mini --mode autonomous --level deep`.
 
 Across several runs the pipeline's Reviewer repeatedly CAUGHT real, subtle bugs in the
 Writer's attempts — a `verified` flag flipped by any read/bash call; brittle keyword
@@ -41,11 +41,11 @@ improved AgentReforge itself: the Writer now pushes each increment to the Review
 and the Reviewer now judges by IMPACT — rejecting real defects, approving when only minor
 nits remain.)
 
-The delivered improvement is **prompt-only**: `coder/agent.py`'s system prompt now requires
+The delivered improvement is **prompt-only**: `demo_agent/agent.py`'s system prompt now requires
 a brief plan then explicit self-verification before finishing; the `run_task` loop itself is
 unchanged (no hard code enforcement — a soft, prompt-level guarantee). Separately, a genuine
 tool bug was fixed in baseline: `run_bash` now always reports `(exit N)` so a failing check
-can't be mistaken for success. Improved coder: branch `improve/20260726_150948_996321`.
+can't be mistaken for success. Improved demo agent: branch `improve/20260726_150948_996321`.
 
 ## After improvement
 

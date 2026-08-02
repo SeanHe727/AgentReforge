@@ -1,1 +1,1 @@
-"""Comparison harness: run the demo coder on real-engineering problems and grade it."""
+"""Comparison harness: run demo_agent on real-engineering problems and grade it."""

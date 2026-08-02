@@ -1,4 +1,4 @@
-"""Deliverer facade: deterministic Runner plus runtime goal judgment."""
+"""Deliverer facade: agent-driven execution plus universal delivery gates."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class Delivery:
 
 
 class DeliveryCoordinator:
-    """The Deliverer boundary combining its Runner and LLM runtime judge."""
+    """Protect the candidate while the Deliverer actively gathers evidence."""
 
     def __init__(
         self,
@@ -64,16 +64,30 @@ class DeliveryCoordinator:
         cwd: str,
         loop_diff: str = "",
     ) -> Delivery:
-        acceptance = await self.runner.run(proposal, cwd=cwd)
-        goal = await self.deliverer.review(
-            proposal,
-            loop_diff=loop_diff,
-            acceptance=acceptance,
-        )
+        # Production Deliverer owns action selection and invokes the trusted
+        # execution substrate as tools. The compatibility path keeps injected
+        # test/legacy judges working while callers migrate.
+        agentic_deliver = getattr(self.deliverer, "deliver", None)
+        if callable(agentic_deliver):
+            attempt = await agentic_deliver(
+                proposal,
+                cwd=cwd,
+                loop_diff=loop_diff,
+                runner=self.runner,
+            )
+            acceptance = attempt.evidence
+            goal = attempt.review
+        else:
+            acceptance = await self.runner.run(proposal, cwd=cwd)
+            goal = await self.deliverer.review(
+                proposal,
+                loop_diff=loop_diff,
+                acceptance=acceptance,
+            )
 
         reasons = list(acceptance.failures)
         if not acceptance.passed:
-            reasons.insert(0, "deterministic delivery/commit gate failed")
+            reasons.insert(0, "universal delivery/commit gate failed")
         if goal.handoff_failed:
             reasons.append("Deliverer output hand-off failed")
         elif not goal.accepted:
@@ -107,7 +121,7 @@ class DeliveryCoordinator:
             failure_kind=failure_kind,
             reasons=(
                 reasons
-                or ["delivery/commit gate + high-level goal realization review passed"]
+                or ["universal delivery gates clear + Deliverer accepted"]
             ),
         )
 

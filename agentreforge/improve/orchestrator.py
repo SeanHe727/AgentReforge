@@ -61,6 +61,16 @@ PHASE 1 — ORIENT
   excuse to repeat the same intervention. If the capability is present, move on. If it
   is present but ineffective, diagnose the next direct cause instead of rewording or
   reimplementing the recorded solution.
+- Treat `improvement_backlog` as a DYNAMIC HYPOTHESIS BACKLOG, not a fixed roadmap.
+  Re-assess it against the current tree and latest trajectory every Loop: re-rank useful
+  items, refine an imprecise item, add newly discovered direct causes, and retire stale
+  hypotheses. `open`, `deferred`, and `attempt_failed` items are not obligations, but
+  they must be considered before inventing a new Candidate or abstaining.
+- A `behavior_verified` backlog item closes only its recorded tuple of capability gap,
+  mechanism, expected delta, and verification scope. It does NOT close a broad field
+  such as "tool use", and it does not by itself prove a causal pre/post improvement.
+  Work in the same field is allowed when it has a different direct cause, mechanism, or
+  observable delta.
 - Treat every non-completed Loop's `failure_kind` and `attempt_fingerprint` as a
   Negative-Attempt Ledger. After `verification_gap`, do not repeat the same Candidate
   with the same unavailable evidence requirement. Change the verification mechanism,
@@ -68,7 +78,9 @@ PHASE 1 — ORIENT
   not a new attempt.
 
 PHASE 2 — DIAGNOSE
-- Identify 1-3 capability gaps. For each, distinguish observed symptom, likely root
+- Identify 1-5 capability gaps. Start from the prior dynamic backlog, then update it
+  from the whole current architecture and latest evidence rather than examining only
+  the most recently delivered Scenario. For each, distinguish observed symptom, likely root
   cause, missing capability, evidence references, and uncertainty.
 - A missing action in one trajectory is not automatically a missing system feature.
   Check the source to learn whether the failure is instruction, workflow, tool, state,
@@ -84,9 +96,10 @@ PHASE 3 — GENERATE CANDIDATES
   module when the evidence supports a smaller fix.
 - Reject changes that only patch the observed example without a reusable mechanism.
 - Exclude every Candidate whose capability delta is already in the verified Achievement
-  Ledger unless new trajectory, test, or source evidence proves that capability remains
-  ineffective. In that case target the newly diagnosed direct cause; do not select a
-  cosmetic refinement of the completed intervention.
+  Ledger at the SAME completion scope unless new trajectory, test, or source evidence
+  proves that exact capability remains ineffective. In that case target the newly
+  diagnosed direct cause; do not select a cosmetic refinement of the completed
+  intervention.
 - Capability-level de-duplication is your responsibility, not string equality. Treat
   renamed variants such as "fallback guidance" and "strengthen fallback guidance" as
   the same delivered capability when their mechanism and expected delta are equivalent.
@@ -97,28 +110,43 @@ PHASE 3 — GENERATE CANDIDATES
   purpose is merely to make AgentReforge's gate or evaluator pass. It is eligible only
   when independent evidence shows the target agent itself has the corresponding runtime
   or usability defect.
+- Represent the current todo set as `candidate_backlog`, a dictionary keyed by a stable
+  Candidate id. Every item must carry its diagnosis, intervention, priority, scope,
+  dependencies/conflicts, and history/disposition. Do not make the todo list a list of
+  names. Preserve a prior id when the hypothesis is materially the same.
 
 PHASE 4 — SELECT ONE IMPROVEMENT
 - Rank candidates by evidence strength, cross-task capability benefit, causal clarity,
   risk, effort, and testability.
-- One Loop selects exactly ONE Candidate and produces exactly ONE implementation Task.
-  The Task may touch multiple files and complete a coherent cross-component capability,
-  but it has one objective, one Reviewer decision, and one Loop commit.
-- If the best Candidate is too large for one bounded Task, select the smallest coherent
+- One Loop selects exactly ONE backlog Candidate and expands it into exactly ONE
+  `selected_change_contract`. The Contract is one CHANGE UNIT: the smallest independently
+  useful, causally coherent,
+  end-to-end verifiable capability delta. It may contain several implementation steps
+  and touch multiple files, but it has one primary root cause, one observable delta,
+  one Reviewer decision, and one Loop commit.
+- Split by outcome and causal boundary, not by file, module, or broad field:
+  * same outcome + same mechanism across several files -> one Change Unit;
+  * different outcomes that merely touch the same files -> separate Loops;
+  * independent improvements -> separate backlog items, even when both are small;
+  * one large capability -> choose a vertical slice that is useful and demonstrable
+    without the deferred slices.
+- If the best Candidate is too large for one bounded Contract, select the smallest coherent
   capability slice that is independently useful and verifiable. Record deferred slices
   as remaining gaps for later Loops; do not create a multi-Task batch.
 - Explain why this Candidate is the highest-value unsolved capability and why it is not
   a duplicate of a delivered achievement.
 
-PHASE 5 — PLAN
-- Create exactly one Task and name its one selected Candidate.
-- Keep the two dependency namespaces distinct:
-  Candidate `dependencies` contain exact Candidate names, while Task `dependencies`
-  contain ONLY exact Task `id` values declared in this proposal. Never put a Candidate
-  name, description, or capability label in a Task dependency. The single Task is a
-  runnable root and therefore has an empty dependency list.
-- Then define the write boundary, per-Task acceptance contract, batch-level Delivery
-  checks, rollback plan, and final decision.
+PHASE 5 — CONTRACT
+- Set `selected_candidate_id` to one exact key from `candidate_backlog`.
+- Expand only that Candidate into `selected_change_contract`. Snapshot its diagnosis and
+  intervention, then define objective, inputs/expected outputs, required behavior,
+  implementation constraints, invariants, prohibited shortcuts, suggested write scope,
+  Reviewer focus, acceptance criteria, Delivery scenarios/checklist, and rollback.
+- Put whole-picture boundaries in `proposal_guardrails`. They are constitutional
+  constraints: implementation may deviate from suggested paths but Writer, Reviewer, and
+  Deliverer must not contradict them.
+- Before final output call `validate_plan` with one root entry using the Contract id and
+  an empty dependency list.
 
 Rules:
 - Use the read-only tools (read_file, search_code, grep, list_dir, glob) to inspect the
@@ -133,23 +161,30 @@ Rules:
   new evidence-backed unsolved capability, when only completed achievements remain,
   when the only available work would optimize a Delivery/evaluation artifact, or when
   evidence is too weak to identify a direct cause. Do not invent work to consume Loops.
-- BEFORE emitting the proposal, call `validate_plan` with your `tasks` (a list of
-  {id, dependencies}). If it reports problems (duplicate ids, unknown dependencies,
-  cycles, no runnable root), FIX the task graph and validate again. For an unknown Task
-  dependency, replace it with an exact declared Task id or remove it when the relationship
-  belongs only at Candidate level. Only output the final proposal once validate_plan passes.
-- `allowed_write_paths`, `affected_components`, clauses, and acceptance criteria are
+- Before `abstain`, audit the current dynamic backlog AND the whole source-visible
+  architecture. In `decision_reason`, explain why each still-open/deferred/failed
+  hypothesis is now solved, unsupported, blocked, or lower-value than the cost/risk.
+  One successful Scenario or one `behavior_verified` item is never enough to declare a
+  broad field—or the whole agent—complete. Recoverable tool/runtime failures in the
+  latest trajectory remain diagnostic evidence even when the final Scenario passed.
+- BEFORE emitting the proposal, call `validate_plan` with one item:
+  `{id: selected_change_contract.contract_id, dependencies: []}`. Only output the final
+  decision once validate_plan passes.
+- Contract `allowed_write_paths`, `affected_components`, clauses, and acceptance criteria are
   implementation suggestions for Writer/Reviewer, not hard authorization boundaries.
   Keep them useful and concise; do not over-specify a small change.
-- Acceptance criteria are review/test hints. Only explicit safety-property checks,
-  `delivery_run`, and frozen `delivery_scenarios` participate in Delivery.
+- Contract acceptance criteria are review/test hints. Only explicit safety-property
+  checks, `delivery_run`, and frozen `delivery_scenarios` participate in Delivery.
 - For a target agent with a runnable CLI, prefer one or two `delivery_scenarios` that
-  exercise the selected capability end to end. Each scenario contains a frozen prompt,
-  a safe argv command using `{prompt}` and `{workspace}`, a small isolated fixture, and
+   exercise the selected capability end to end. Each scenario contains a frozen prompt,
+  a safe argv command, a small isolated fixture, and
   observable expected/forbidden behaviors. Design scenarios before Writer runs; do not
   adapt acceptance difficulty after seeing the implementation.
 - Scenario commands are argv arrays, never shell strings. Inspect the real target
-  entrypoint and use `{workspace}` for the disposable task directory. Keep scenarios
+  entrypoint and match its actual CLI. Use `{prompt}` only when that CLI accepts a
+  natural-language task argument; use `{workspace}` only when it accepts a workspace
+  path. A prompt also describes the scenario to the Deliverer and does not have to be
+  passed to the process. Keep scenarios
   bounded and directly causal: they decide Delivery for this Candidate, not general
   benchmark quality. Optional later diagnostic probes may explain failure but cannot
   change the frozen pass/fail scenarios.
@@ -160,64 +195,73 @@ Rules:
   requirements instead; do not claim an unobservable process property.
 - When a scenario depends on executable availability, declare only the necessary
   typed `executable_conditions` (`name` plus `available|unavailable`). The trusted
-  Runner materializes and records these conditions. Never encode environment setup
+  execution tool materializes and records these conditions. Never encode environment setup
   in the prompt, fixture, arbitrary environment variables, or a shell command.
-  A scenario with executable conditions must set `requires_trajectory=true`.
-- `delivery_run` is SYSTEM input for the deterministic delivery/commit gate: a small
-  fallback package-start command when a target-agent scenario cannot be executed. Runner
-  commands, exit codes, bounded output, scenario artifacts, and available trajectory are
-  supplied to the Delivery Judge as runtime evidence, but a deterministic Runner failure
-  cannot be overridden by the Judge. Do not grade general generated-code quality here.
+- `delivery_run` contains bounded system-level smoke/start suggestions. The Deliverer
+  agent chooses and invokes frozen run/scenario tools, observes commands, exit codes,
+  bounded output, artifacts, and trajectory, then judges the result. Execution evidence
+  can establish a hard failure but cannot by itself establish goal realization.
+  Do not grade general generated-code quality here.
 - Verification commands must not leave runtime artifacts in the candidate. Prefer
   `PYTHONDONTWRITEBYTECODE=1 python3` for Python commands (do not assume a `python`
   alias exists) and never include `__pycache__`,
   `*.pyc`, `.pytest_cache`, coverage output, or runtime state files in allowed_write_paths;
   the post-write policy gate hard-denies those artifacts.
-- Do NOT create a Writer Task whose job is to prove that Delivery commands leave the
+- Do NOT create a Change Contract whose job is to prove that Delivery commands leave the
   worktree unchanged. DeliveryCoordinator owns this invariant deterministically by
-  comparing pre/post candidate tree snapshots. Tasks may add real product tests or smoke
+  comparing pre/post candidate tree snapshots. Contracts may add real product tests or smoke
   scripts, but repository immutability is not a product-code requirement.
 - For a genuine safety property, mark its criterion with
   `verified_safety_properties` and use `mode=invariant`. Safety probes are system-owned:
   leave the criterion `command` empty. Never attach a safety property to an ordinary
   capability scenario or generate a prompt asking the target agent to claim that it
-  was blocked. The Runner's target adapter executes the actual tool-level traversal
-  probe and decides from its exit code. Never encode a condition that rewards the
-  safety violation. `{prompt}` and `{workspace}` remain
-  scenario-only placeholders and must not appear in `delivery_run`.
+  was blocked. The execution tool's target adapter executes the actual traversal
+  probe and reports its exit code. Never encode a condition that rewards the
+  safety violation.
 - `required_safety_properties` is EMPTY BY DEFAULT. Declare `path_confinement` only
   when the selected Candidate itself implements, modifies, or promises to preserve a
   path-taking/filesystem boundary. Never attach it to an unrelated prompt, runtime
-  fallback, model, or workflow change. A Task that declares it must reference one
+  fallback, model, or workflow change. A Contract that declares it must contain one
   matching invariant criterion; the criterion must list `path_confinement` and leave
   `command` empty. Do not require a safety property that the baseline does not have
   unless implementing that property is the Candidate's explicit objective.
 
 When done, output ONLY the proposal as ONE JSON object in a ```json code block. Field types:
-- analysis: {
-  findings: [{symptom, root_cause, capability_gap, evidence_refs: [str], uncertainty}],
-  candidates: [{name, level: prompt|workflow|tool|module|architecture, mechanism,
-    expected_capability_delta, evidence_strength: 1-5, benefit: 1-5, risk: 1-5,
-    effort: 1-5, dependencies: [candidate_name], conflicts_with: [candidate_name],
-    rejected_reason}],
-  selected_candidates: [exactly_one_candidate_name],
-  batch_budget: {max_candidates, max_tasks, max_total_effort, selected_total_effort},
-  packing_reason, compatibility_notes: [str], selection_reason, causal_mechanism,
-  expected_capability_delta}
+- candidate_backlog: {stable_candidate_id: {
+    id: same stable_candidate_id,
+    status: open|deferred|attempt_failed|behavior_verified,
+    title,
+    diagnosis: {symptom, root_cause, capability_gap, evidence_refs: [str], uncertainty},
+    intervention: {level: prompt|workflow|tool|module|architecture, mechanism,
+      expected_capability_delta},
+    priority: {benefit: 1-5, risk: 1-5, effort: 1-5, confidence: 0-1, rank_reason},
+    scope: {affected_components: [str], non_goals: [str]},
+    dependencies: [candidate_id], conflicts_with: [candidate_id],
+    history: {first_seen_loop: int, last_reviewed_loop: int,
+      previous_attempts: [str], verification_scope: [str],
+      verification_level: none|implemented|behavior_verified|delta_demonstrated,
+      disposition_reason}
+  }}
+- selected_candidate_id: exactly one candidate_backlog key for proceed/needs_human,
+  empty for abstain.
+- selected_change_contract: null for abstain, otherwise {
+    contract_id, backlog_item_id: selected_candidate_id, backlog_revision: int,
+    objective, rationale,
+    diagnosis: the selected Candidate diagnosis snapshot,
+    intervention: the selected Candidate intervention snapshot,
+    inputs: [{id, description}], expected_outputs: [{id, description}],
+    required_behaviors: [{id, description}],
+    implementation_constraints: [{id, description}],
+    invariants: [{id, description}],
+    prohibited_shortcuts: [{id, description}],
+    affected_components: [str], allowed_write_paths: [str], reviewer_focus: [str],
+    required_safety_properties: [] by default or [path_confinement],
+    acceptance_criteria: [AcceptanceCriterion objects described below],
+    delivery_run: [str], delivery_scenarios: [DeliveryScenario objects described below],
+    delivery_checklist: [str], rollback_plan}
+- proposal_guardrails: [{id, description}] for whole-picture constraints that no
+  implementation path may violate.
 - evidence[]: {source_type: trajectory|test|benchmark|code|log, reference: str, observation: str}
-- tasks[] is the shared Writer/Reviewer brief:
-  {id: str, candidate: str, description: str, rationale: str, capability_change: str,
-  required_behaviors: [{id, description}],
-  implementation_constraints: [{id, description}],
-  invariants: [{id, description}],
-  prohibited_shortcuts: [{id, description}],
-  affected_components: [str], reviewer_focus: [str],
-  required_safety_properties: [] by default, or [path_confinement] only for a
-  path/filesystem-boundary Candidate,
-  dependencies: [task_id], acceptance_criteria_ids: [str]}.
-  Exactly one Task is allowed per proceeding Loop. Only `id`, `description`, and valid
-  Task dependencies are essential. Other fields should clarify the work when useful
-  and may remain empty for a simple Task.
 - acceptance_criteria[]: {id: str, description: str,
   mode: red_green|invariant|metric_improvement|non_regression|manual,
   check_type: unit|integration|smoke,
@@ -225,21 +269,26 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
   required_output_contains: [str], forbidden_output_contains: [str],
   verified_safety_properties: [path_confinement],
   test_level: full|focused|basic, required: bool}
-- allowed_write_paths[]: suggested repository areas, not a hard write boundary.
 - benefit/risk/effort: int 1-5; confidence: float 0-1
 - decision: proceed|abstain|needs_human
-- delivery_run[]: system-level integration/smoke commands for the improved agent package.
-- delivery_scenarios[]: {id: str, prompt: str,
-  command: [argv strings containing {prompt} and {workspace}],
+- selected_change_contract.delivery_run[]: system-level integration/smoke commands.
+- selected_change_contract.delivery_scenarios[]: {id: str, prompt: str,
+  command: [argv strings, optionally containing {prompt} and/or {workspace} only
+    when required by the target entrypoint],
   fixture_files: {repo_relative_path: content},
   expected_behaviors: [str], forbidden_behaviors: [str],
   executable_conditions: [{name: str, state: available|unavailable}],
   requires_trajectory: bool}.
-- delivery_checklist[]: high-level system requirements the Deliverer can judge from the
+- selected_change_contract.delivery_checklist[]: high-level system requirements.
+- The Proposal-level fields `summary`, `problem_statement`, `goals`, `non_goals`,
+  `affected_components`, and `dependencies` describe the whole-picture intent.
+- The legacy fields `analysis`, `tasks`, `allowed_write_paths`, `acceptance_criteria`,
+  `delivery_run`, `delivery_scenarios`, and `delivery_checklist` should be omitted.
+- Contract delivery_checklist items are system requirements the Deliverer can judge from the
   full diff and scenario evidence (the selected Candidate is implemented, reachable, and
   observed in the intended path). Do not require it to repeat function-level review.
 - also: summary, problem_statement, goals[], non_goals[], affected_components[],
-  dependencies[], decision_reason, rollback_plan, alternatives_considered[]"""
+  dependencies[], decision_reason, alternatives_considered[]"""
 
 
 class Orchestrator:
@@ -298,10 +347,8 @@ class Orchestrator:
             "problem and keep everything else valid. For a missing safety-property "
             "mapping, update BOTH sides: tag an invariant acceptance criterion with "
             "`verified_safety_properties`, leave its command empty because the probe is "
-            "system-owned, and add that exact criterion id to the owning Task's "
-            "`acceptance_criteria_ids`. For an unknown Task dependency, use ONLY "
-            "an exact `id` from the proposal's `tasks` list; never use a Candidate name "
-            "or description as a Task dependency."
+            "system-owned, and declare the same safety property in the Selected Change "
+            "Contract. The Contract is the only execution unit and has no Task DAG."
         )
         text = await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT

@@ -172,7 +172,7 @@ def _make_improve_approver(auto_yes: bool):
         )
         typer.echo(f"Gate    : {decision.decision} — {'; '.join(decision.reasons)}", err=True)
         typer.echo("Tasks   :", err=True)
-        for t in proposal.tasks:
+        for t in proposal.execution_tasks():
             typer.echo(f"  - [{t.id}] {t.description}", err=True)
         answer = input("Approve this improvement intent? [y/N] ").strip().lower()
         return Approval(approved=answer in ("y", "yes"), approved_by="cli")

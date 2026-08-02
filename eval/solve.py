@@ -1,7 +1,7 @@
-"""Run a demo-coder version on every problem and leave its solutions on disk.
+"""Run a demo_agent version on every problem and leave its solutions on disk.
 
 No grading here — the produced code is meant to be handed to a judge (Codex). A
-"version" is just a path to a coder repo, so this runs the baseline or any improved
+"version" is just a path to the demo repo, so this runs the baseline or any improved
 worktree. Each solution lands in <out>/<problem_id>/ next to a TASK.md copy so the
 judge sees the task + rubric beside the code.
 """
@@ -17,7 +17,7 @@ from .problems import problems
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--agent", required=True, help="path to the coder repo to run")
+    ap.add_argument("--agent", required=True, help="path to the demo-agent repo to run")
     ap.add_argument("--out", required=True, help="output dir; solutions go to <out>/<id>/")
     ap.add_argument("--max-steps", type=int, default=15)
     args = ap.parse_args()

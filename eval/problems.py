@@ -1,4 +1,4 @@
-"""Hard real-engineering problems the demo coder must solve — the test dataset.
+"""Hard real-engineering problems demo_agent must solve — the test dataset.
 
 Each is a demanding multi-component system with concurrency, persistence, or state
 machines and many correctness traps. A single bare pass typically ships something

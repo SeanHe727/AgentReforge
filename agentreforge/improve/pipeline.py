@@ -60,6 +60,7 @@ from .run_config import (
     RecursionPolicy,
     profile_for,
 )
+from .trajectory import append_target_trajectory
 from .worktree import GitError, WorktreeSession, _run_git
 from .writer_reviewer import ExecutionOutcome, WriterReviewer
 
@@ -252,6 +253,7 @@ class ImprovementPipeline:
                         result,
                     )
                     target_trajectory.extend(fresh_trajectory)
+                    append_target_trajectory(self.cwd, fresh_trajectory)
                     for ref in _target_run_refs(fresh_trajectory):
                         if ref not in run_record.target_run_refs:
                             run_record.target_run_refs.append(ref)
@@ -447,7 +449,7 @@ class ImprovementPipeline:
             repair_outcome = await writer.repair(
                 worktree=wt,
                 instruction=_repair_instruction(delivery),
-                allowed_write_paths=proposal.allowed_write_paths,
+                allowed_write_paths=proposal.contract_allowed_write_paths(),
             )
             for task_outcome in repair_outcome.task_outcomes:
                 task_outcome.repair_iteration = repairs
@@ -580,7 +582,7 @@ class ImprovementPipeline:
                 lines.append("- **Tasks:**")
                 task_specs = {
                     task.id: task
-                    for task in (r.proposal.tasks if r.proposal else [])
+                    for task in (r.proposal.execution_tasks() if r.proposal else [])
                 }
                 for outcome in r.outcome.task_outcomes:
                     spec = task_specs.get(outcome.task_id)
@@ -633,7 +635,7 @@ class ImprovementPipeline:
             return proposal
         tries = 0
         while tries <= max_tries:
-            dag = validate_plan([t.model_dump() for t in proposal.tasks])
+            dag = validate_plan([t.model_dump() for t in proposal.execution_tasks()])
             acceptance = validate_acceptance(proposal)
             problems = []
             if not dag.valid:
@@ -777,6 +779,34 @@ def _target_run_refs(records: list[dict[str, Any]]) -> list[str]:
 def _analysis_problems(proposal: ImprovementProposal) -> list[str]:
     """Validate the single-Candidate/single-Task Orchestrator hand-off."""
 
+    if proposal.candidate_backlog or proposal.selected_change_contract is not None:
+        problems = []
+        mismatched_ids = [
+            key
+            for key, candidate in proposal.candidate_backlog.items()
+            if key != candidate.id
+        ]
+        if mismatched_ids:
+            problems.append(
+                "candidate_backlog keys must match candidate ids: "
+                + ", ".join(mismatched_ids)
+            )
+        selected_id = proposal.selected_candidate_id
+        if proposal.decision != "abstain" and not selected_id:
+            problems.append("a proceeding Loop must select exactly one Candidate id")
+        if selected_id and selected_id not in proposal.candidate_backlog:
+            problems.append("selected_candidate_id must name a declared backlog item")
+        contract = proposal.selected_change_contract
+        if proposal.decision != "abstain" and contract is None:
+            problems.append("a proceeding Loop must contain one Selected Change Contract")
+        if contract is not None and contract.backlog_item_id != selected_id:
+            problems.append(
+                "Selected Change Contract must reference selected_candidate_id"
+            )
+        if proposal.decision == "abstain" and contract is not None:
+            problems.append("an abstaining Loop must not contain an execution contract")
+        return problems
+
     analysis = proposal.analysis
     problems = []
     candidates = {candidate.name: candidate for candidate in analysis.candidates}
@@ -838,9 +868,22 @@ def _materialize_loop_record(
                     "proposal": proposal.model_dump(mode="json"),
                     "problem_statement": proposal.problem_statement,
                     "analysis": proposal.analysis.model_dump(mode="json"),
-                    "tasks": [task.model_dump(mode="json") for task in proposal.tasks],
+                    "candidate_backlog": {
+                        key: item.model_dump(mode="json")
+                        for key, item in proposal.candidate_backlog.items()
+                    },
+                    "selected_candidate_id": proposal.selected_candidate_id,
+                    "selected_change_contract": (
+                        proposal.selected_change_contract.model_dump(mode="json")
+                        if proposal.selected_change_contract
+                        else None
+                    ),
+                    "tasks": [
+                        task.model_dump(mode="json")
+                        for task in proposal.execution_tasks()
+                    ],
                     "evidence": [item.model_dump(mode="json") for item in proposal.evidence],
-                    "allowed_write_paths": proposal.allowed_write_paths,
+                    "allowed_write_paths": proposal.contract_allowed_write_paths(),
                 },
             )
         )
@@ -903,20 +946,18 @@ def _materialize_loop_record(
         components.extend(
             [
                 ComponentRecord(
-                    component="acceptance_runner",
-                    status="passed" if result.delivery.delivery_gate_ok else "failed",
-                    summary="; ".join(result.delivery.acceptance_failures),
-                    details={
-                        "runs": jsonable(result.delivery.runs),
-                        "scenario_runs": jsonable(result.delivery.scenario_runs),
-                        "failures": result.delivery.acceptance_failures,
-                    },
-                ),
-                ComponentRecord(
                     component="deliverer",
                     status="accepted" if result.delivery.goal_accepted else "rejected",
                     summary=result.delivery.goal_review,
-                    details={"goal_review": result.delivery.goal_review},
+                    details={
+                        "execution_evidence": {
+                            "runs": jsonable(result.delivery.runs),
+                            "scenario_runs": jsonable(result.delivery.scenario_runs),
+                            "hard_gate_clear": result.delivery.delivery_gate_ok,
+                            "universal_failures": result.delivery.acceptance_failures,
+                        },
+                        "goal_review": result.delivery.goal_review,
+                    },
                 ),
                 ComponentRecord(
                     component="delivery_coordinator",
@@ -934,28 +975,59 @@ def _materialize_loop_record(
             ]
         )
 
-    diagnosis = proposal.analysis.model_dump(mode="json") if proposal else {}
+    diagnosis = {}
+    if proposal is not None:
+        diagnosis = (
+            {
+                "candidate_backlog": {
+                    key: item.model_dump(mode="json")
+                    for key, item in proposal.candidate_backlog.items()
+                },
+                "selected_candidate_id": proposal.selected_candidate_id,
+            }
+            if proposal.candidate_backlog
+            else proposal.analysis.model_dump(mode="json")
+        )
     achievements = []
+    completion_scopes = []
     remaining = []
     delivered = result.delivery is not None and result.delivery.passed
     if proposal is not None:
+        contract = proposal.execution_contract()
         if delivered:
-            selected = set(proposal.analysis.selected_candidates)
-            achievements = [
-                (
-                    f"{candidate.name}: {candidate.expected_capability_delta}"
-                    if candidate.expected_capability_delta
-                    else candidate.name
-                )
-                for candidate in proposal.analysis.candidates
-                if candidate.name in selected
-            ]
+            if contract is not None:
+                achievements = [
+                    f"{contract.backlog_item_id}: "
+                    f"{contract.intervention.expected_capability_delta}"
+                ]
+                completion_scopes = [
+                    {
+                        "candidate": contract.backlog_item_id,
+                        "capability_gap": contract.diagnosis.capability_gap,
+                        "mechanism": contract.intervention.mechanism,
+                        "expected_capability_delta": (
+                            contract.intervention.expected_capability_delta
+                        ),
+                        "evidence_scope": [
+                            scenario.id for scenario in contract.delivery_scenarios
+                        ],
+                        "verification_level": "behavior_verified",
+                    }
+                ]
         else:
-            remaining = [
-                finding.capability_gap
-                for finding in proposal.analysis.findings
-                if finding.capability_gap
-            ]
+            remaining = (
+                [
+                    item.diagnosis.capability_gap
+                    for item in proposal.candidate_backlog.values()
+                    if item.status != "behavior_verified"
+                ]
+                if proposal.candidate_backlog
+                else [
+                    finding.capability_gap
+                    for finding in proposal.analysis.findings
+                    if finding.capability_gap
+                ]
+            )
     commit = (
         result.version.verified_commit
         if result.version and result.version.verified_commit
@@ -974,6 +1046,7 @@ def _materialize_loop_record(
         commit=commit,
         completed=delivered,
         achievements=achievements,
+        completion_scopes=completion_scopes,
         remaining_gaps=remaining,
         failure_kind=(
             result.delivery.failure_kind
@@ -990,12 +1063,19 @@ def _materialize_loop_record(
 def _proposal_attempt_fingerprint(proposal: ImprovementProposal) -> str:
     """Stable identity for one Candidate plus its frozen verification strategy."""
 
+    contract = proposal.execution_contract()
+    scenarios = contract.delivery_scenarios if contract is not None else []
     payload = {
-        "candidates": sorted(
-            name.strip().casefold()
-            for name in proposal.analysis.selected_candidates
+        "candidates": [
+            (
+                contract.backlog_item_id
+                if contract is not None
+                else proposal.analysis.selected_candidate
+            ).strip().casefold()
+        ],
+        "delivery_run": sorted(
+            contract.delivery_run if contract is not None else []
         ),
-        "delivery_run": sorted(proposal.delivery_run),
         "scenarios": sorted(
             (
                 tuple(scenario.command),
@@ -1009,7 +1089,7 @@ def _proposal_attempt_fingerprint(proposal: ImprovementProposal) -> str:
                 tuple(sorted(scenario.expected_behaviors)),
                 tuple(sorted(scenario.forbidden_behaviors)),
             )
-            for scenario in proposal.delivery_scenarios
+            for scenario in scenarios
         ),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
@@ -1109,7 +1189,9 @@ def _negative_attempt_problems(
     """Reject an unchanged verification strategy after a recorded failed attempt."""
 
     fingerprint = _proposal_attempt_fingerprint(proposal)
-    selected = set(proposal.analysis.selected_candidates)
+    contract = proposal.execution_contract()
+    selected = {contract.backlog_item_id} if contract is not None else set()
+    scenarios = contract.delivery_scenarios if contract is not None else []
     problems: list[str] = []
     for record in loop_history:
         if record.completed or record.failure_kind == "none":
@@ -1118,6 +1200,8 @@ def _negative_attempt_problems(
             str(value)
             for value in (record.diagnosis.get("selected_candidates") or [])
         )
+        if record.diagnosis.get("selected_candidate_id"):
+            previous_selected.add(str(record.diagnosis["selected_candidate_id"]))
         same_candidate = bool(selected & previous_selected)
         if record.attempt_fingerprint == fingerprint:
             problems.append(
@@ -1132,7 +1216,7 @@ def _negative_attempt_problems(
         if (
             same_candidate
             and missing_trajectory
-            and any(scenario.requires_trajectory for scenario in proposal.delivery_scenarios)
+            and any(scenario.requires_trajectory for scenario in scenarios)
         ):
             problems.append(
                 f"{record.loop_id} proved required trajectory unavailable for this "
@@ -1156,7 +1240,7 @@ def _negative_attempt_problems(
 def _proposal_required_safety(proposal: ImprovementProposal) -> set[str]:
     return {
         str(safety)
-        for task in proposal.tasks
+        for task in proposal.execution_tasks()
         for safety in task.required_safety_properties
     }
 
@@ -1168,6 +1252,12 @@ def _record_required_safety(record: ReforgeLoopRecord) -> set[str]:
         proposal = component.details.get("proposal")
         if not isinstance(proposal, dict):
             continue
+        contract = proposal.get("selected_change_contract")
+        if isinstance(contract, dict):
+            return {
+                str(safety)
+                for safety in (contract.get("required_safety_properties") or [])
+            }
         tasks = proposal.get("tasks")
         if not isinstance(tasks, list):
             continue
@@ -1250,7 +1340,7 @@ def _repair_instruction(delivery: Delivery) -> str:
         "an output assertion by hardcoding its missing marker into unrelated output:",
     ]
     if delivery.acceptance_failures:
-        lines.append("\nDeterministic AcceptanceRunner failures:")
+        lines.append("\nUniversal execution failures:")
         lines.extend(f"- {failure}" for failure in delivery.acceptance_failures)
     # Include exit-0 runs too: an output assertion can fail even when the command
     # itself succeeds.

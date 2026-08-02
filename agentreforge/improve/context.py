@@ -14,7 +14,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .models import (
+    BacklogCandidate,
+    CandidateDiagnosis,
+    CandidateHistory,
+    CandidateIntervention,
+    CandidatePriority,
+    CandidateScope,
+)
 from .records import ReforgeLoopRecord, ReforgeLoopSummary, TargetRunSummary
+from .trajectory import tool_result_is_error
 
 _SKIP_DIRS = {
     ".git",
@@ -64,6 +73,9 @@ class OrchestratorContext(BaseModel):
     target_agent_runs: list[TargetRunSummary] = Field(default_factory=list)
     # AgentReforge's own history; never mixed into target_agent_runs.
     previous_reforge_loops: list[ReforgeLoopSummary] = Field(default_factory=list)
+    # Dynamic hypothesis list reconstructed from every previous proposal.  The
+    # Orchestrator re-ranks and revises it; it is not a frozen implementation plan.
+    improvement_backlog: dict[str, BacklogCandidate] = Field(default_factory=dict)
     repository: RepositoryContext
     run_manifest: dict[str, Any] = Field(default_factory=dict)
     evidence_catalog: list[dict[str, Any]] = Field(default_factory=list)
@@ -105,6 +117,7 @@ class OrchestratorContextBuilder:
             improvement_intent=intent,
             target_agent_runs=summaries,
             previous_reforge_loops=loop_summaries,
+            improvement_backlog=_build_improvement_backlog(previous_reforge_loops),
             repository=self._repository_context(),
             run_manifest=run_manifest,
             evidence_catalog=evidence,
@@ -183,7 +196,12 @@ def summarize_target_trajectory(
                 task_prompt = str(event.get("task_prompt") or task_prompt)
             elif event_type == "tool_result":
                 tools.append(str(event.get("name") or "unknown"))
-                tool_errors += int(bool(event.get("is_error")))
+                content = str(event.get("content") or "")
+                normalized_error = tool_result_is_error(
+                    content,
+                    declared=bool(event.get("is_error")),
+                )
+                tool_errors += int(normalized_error)
             elif event_type == "error":
                 errors.append(str(event.get("error") or "unknown error"))
                 outcome = "error"
@@ -201,7 +219,11 @@ def summarize_target_trajectory(
                         "type": event_type,
                         "tool": event.get("name"),
                         "arguments": event.get("arguments"),
-                        "is_error": event.get("is_error"),
+                        "is_error": (
+                            normalized_error
+                            if event_type == "tool_result"
+                            else event.get("is_error")
+                        ),
                         "evidence_source": event.get("evidence_source"),
                         "target_commit": event.get("target_commit"),
                         "content": str(
@@ -243,6 +265,15 @@ def _summarize_reforge_loop(record: ReforgeLoopRecord) -> ReforgeLoopSummary:
         for finding in findings
         if isinstance(finding, dict) and finding.get("capability_gap")
     ]
+    candidate_backlog = record.diagnosis.get("candidate_backlog") or {}
+    if isinstance(candidate_backlog, dict):
+        capability_gaps.extend(
+            str(item.get("diagnosis", {}).get("capability_gap"))
+            for item in candidate_backlog.values()
+            if isinstance(item, dict)
+            and isinstance(item.get("diagnosis"), dict)
+            and item["diagnosis"].get("capability_gap")
+        )
     return ReforgeLoopSummary(
         loop_id=record.loop_id,
         loop=record.loop,
@@ -254,6 +285,9 @@ def _summarize_reforge_loop(record: ReforgeLoopRecord) -> ReforgeLoopSummary:
             for value in (record.diagnosis.get("selected_candidates") or [])
             if value
         ] or (
+            [str(record.diagnosis["selected_candidate_id"])]
+            if record.diagnosis.get("selected_candidate_id")
+            else
             [str(record.diagnosis["selected_candidate"])]
             if record.diagnosis.get("selected_candidate")
             else []
@@ -265,8 +299,170 @@ def _summarize_reforge_loop(record: ReforgeLoopRecord) -> ReforgeLoopSummary:
         commit=record.commit,
         completed=record.completed,
         achievements=record.achievements,
+        completion_scopes=record.completion_scopes,
         remaining_gaps=record.remaining_gaps,
         failure_kind=record.failure_kind,
         attempt_fingerprint=record.attempt_fingerprint,
         error=record.error,
     )
+
+
+def _build_improvement_backlog(
+    records: list[ReforgeLoopRecord],
+) -> dict[str, BacklogCandidate]:
+    """Materialize prior Candidate hypotheses without treating them as truth.
+
+    Stable ids carry structured items forward to their latest observation. Broader
+    capability-level equivalence remains an Orchestrator judgment because deterministic
+    string normalization cannot safely merge different mechanisms.
+    """
+
+    backlog: dict[str, BacklogCandidate] = {}
+    for record in sorted(records, key=lambda item: item.loop):
+        structured_backlog = record.diagnosis.get("candidate_backlog") or {}
+        if isinstance(structured_backlog, dict) and structured_backlog:
+            completion_by_candidate = {
+                scope.candidate: scope for scope in record.completion_scopes
+            }
+            selected_id = str(record.diagnosis.get("selected_candidate_id") or "")
+            for candidate_id, raw in structured_backlog.items():
+                if not isinstance(raw, dict):
+                    continue
+                diagnosis = raw.get("diagnosis") or {}
+                intervention = raw.get("intervention") or {}
+                if not isinstance(diagnosis, dict) or not isinstance(
+                    intervention, dict
+                ):
+                    continue
+                if str(candidate_id) == selected_id and record.completed:
+                    status = "behavior_verified"
+                    reason = (
+                        "selected, delivered, and verified in the recorded evidence scope"
+                    )
+                elif str(candidate_id) == selected_id:
+                    status = "attempt_failed"
+                    reason = record.error or record.failure_kind
+                else:
+                    status = str(raw.get("status") or "open")
+                    reason = str(
+                        (raw.get("history") or {}).get("disposition_reason") or ""
+                    )
+                history = raw.get("history") or {}
+                if not isinstance(history, dict):
+                    history = {}
+                completion = completion_by_candidate.get(str(candidate_id))
+                backlog[str(candidate_id)] = BacklogCandidate(
+                    id=str(candidate_id),
+                    status=status,
+                    title=str(raw.get("title") or candidate_id),
+                    diagnosis=CandidateDiagnosis.model_validate(diagnosis),
+                    intervention=CandidateIntervention.model_validate(intervention),
+                    priority=CandidatePriority.model_validate(raw.get("priority") or {}),
+                    scope=CandidateScope.model_validate(raw.get("scope") or {}),
+                    dependencies=[
+                        str(value) for value in (raw.get("dependencies") or [])
+                    ],
+                    conflicts_with=[
+                        str(value) for value in (raw.get("conflicts_with") or [])
+                    ],
+                    history=CandidateHistory(
+                        first_seen_loop=int(history.get("first_seen_loop") or record.loop),
+                        last_reviewed_loop=record.loop,
+                        previous_attempts=[
+                            str(value)
+                            for value in (history.get("previous_attempts") or [])
+                        ],
+                        verification_scope=(
+                            completion.evidence_scope
+                            if completion
+                            else [
+                                str(value)
+                                for value in (history.get("verification_scope") or [])
+                            ]
+                        ),
+                        verification_level=(
+                            completion.verification_level
+                            if completion
+                            else str(history.get("verification_level") or "none")
+                        ),
+                        disposition_reason=reason,
+                    ),
+                )
+            continue
+
+        candidates = record.diagnosis.get("candidates") or []
+        selected = {
+            str(value)
+            for value in (record.diagnosis.get("selected_candidates") or [])
+            if value
+        }
+        if not selected and record.diagnosis.get("selected_candidate"):
+            selected.add(str(record.diagnosis["selected_candidate"]))
+
+        completion_by_candidate = {
+            scope.candidate: scope for scope in record.completion_scopes
+        }
+        for raw in candidates:
+            if not isinstance(raw, dict) or not raw.get("name"):
+                continue
+            candidate = str(raw["name"])
+            capability_gap = str(raw.get("capability_gap") or "")
+            mechanism = str(raw.get("mechanism") or "")
+            expected_delta = str(raw.get("expected_capability_delta") or "")
+            if candidate in selected and record.completed:
+                status = "behavior_verified"
+                reason = "selected, delivered, and verified in the recorded evidence scope"
+            elif candidate in selected:
+                status = "attempt_failed"
+                reason = record.error or record.failure_kind
+            elif raw.get("rejected_reason"):
+                status = "deferred"
+                reason = str(raw["rejected_reason"])
+            else:
+                status = "open"
+                reason = "considered but not selected"
+            completion = completion_by_candidate.get(candidate)
+
+            backlog[candidate] = BacklogCandidate(
+                id=candidate,
+                status=status,
+                title=candidate,
+                diagnosis=CandidateDiagnosis(
+                    capability_gap=capability_gap or candidate,
+                    evidence_refs=[
+                        str(value)
+                        for value in (raw.get("evidence_refs") or [])
+                        if value
+                    ],
+                ),
+                intervention=CandidateIntervention(
+                    level=str(raw.get("level") or "workflow"),
+                    mechanism=mechanism or candidate,
+                    expected_capability_delta=expected_delta or candidate,
+                ),
+                priority=CandidatePriority(
+                    benefit=int(raw.get("benefit") or 1),
+                    risk=int(raw.get("risk") or 1),
+                    effort=int(raw.get("effort") or 1),
+                    confidence=min(
+                        1.0,
+                        max(0.0, float(raw.get("evidence_strength") or 1) / 5.0),
+                    ),
+                    rank_reason=str(raw.get("rejected_reason") or ""),
+                ),
+                history=CandidateHistory(
+                    first_seen_loop=record.loop,
+                    last_reviewed_loop=record.loop,
+                    previous_attempts=(
+                        [record.attempt_fingerprint]
+                        if candidate in selected and record.attempt_fingerprint
+                        else []
+                    ),
+                    verification_scope=completion.evidence_scope if completion else [],
+                    verification_level=(
+                        completion.verification_level if completion else "none"
+                    ),
+                    disposition_reason=reason,
+                ),
+            )
+    return backlog

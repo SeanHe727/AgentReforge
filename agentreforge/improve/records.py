@@ -48,6 +48,8 @@ class ComponentRecord(BaseModel):
         "orchestrator",
         "writer",
         "reviewer",
+        # Kept only so historical records remain readable. New records store
+        # execution evidence inside the Deliverer component.
         "acceptance_runner",
         "deliverer",
         "delivery_coordinator",
@@ -56,6 +58,21 @@ class ComponentRecord(BaseModel):
     status: str
     summary: str = ""
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilityCompletionScope(BaseModel):
+    """The narrow capability claim one delivered Loop is allowed to close."""
+
+    candidate: str
+    capability_gap: str = ""
+    mechanism: str = ""
+    expected_capability_delta: str = ""
+    evidence_scope: list[str] = Field(default_factory=list)
+    # Delivery demonstrates the frozen behavior in its scenarios.  It does not
+    # automatically establish a causal pre/post improvement delta.
+    verification_level: Literal["implemented", "behavior_verified", "delta_demonstrated"] = (
+        "implemented"
+    )
 
 
 class ReforgeLoopRecord(BaseModel):
@@ -75,6 +92,7 @@ class ReforgeLoopRecord(BaseModel):
     commit: str = ""
     completed: bool = False
     achievements: list[str] = Field(default_factory=list)
+    completion_scopes: list[CapabilityCompletionScope] = Field(default_factory=list)
     remaining_gaps: list[str] = Field(default_factory=list)
     failure_kind: str = "none"
     attempt_fingerprint: str = ""
@@ -96,6 +114,7 @@ class ReforgeLoopSummary(BaseModel):
     commit: str = ""
     completed: bool = False
     achievements: list[str] = Field(default_factory=list)
+    completion_scopes: list[CapabilityCompletionScope] = Field(default_factory=list)
     remaining_gaps: list[str] = Field(default_factory=list)
     failure_kind: str = "none"
     attempt_fingerprint: str = ""

@@ -37,9 +37,9 @@ User intent + target trajectory + current source
     -> Writer implements the Task
     -> Reviewer returns typed blocking/non-blocking findings
     -> malformed hand-offs are rewritten by their producing output module
-    -> Deliverer Runner executes frozen smoke/safety commands and target-agent scenarios
-    -> capture scenario output, generated artifacts, and target trajectory when required
-    -> Delivery Judge assesses actual run evidence against the Loop goal
+    -> Deliverer actively invokes frozen run/scenario tools and watches the target agent
+    -> execution tools capture output, artifacts, environment facts, and trajectory
+    -> Deliverer assesses that actual evidence against the Loop goal
     -> only observed implementation defects may return to Writer for repair
     -> verification/plan/environment failures end the Loop and inform the next one
     -> reject repeated Candidate + verification strategies via the Negative-Attempt Ledger

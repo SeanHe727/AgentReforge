@@ -1,4 +1,4 @@
-"""Run paired coder versions on the deterministic mini benchmark."""
+"""Run paired demo_agent versions on the deterministic mini benchmark."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def run_case(
         [
             sys.executable,
             "-m",
-            "coder",
+            "demo_agent",
             case.prompt,
             "--dir",
             str(solution_dir),
@@ -175,7 +175,7 @@ def main() -> None:
         action="append",
         required=True,
         metavar="NAME=AGENT_REPO",
-        help="repeat for each paired coder version",
+        help="repeat for each paired demo_agent version",
     )
     parser.add_argument("--out", required=True)
     parser.add_argument("--repeats", type=int, default=2)

@@ -1,1 +1,1 @@
-"""Small deterministic brownfield benchmark for demo coder versions."""
+"""Small deterministic brownfield benchmark for demo_agent versions."""

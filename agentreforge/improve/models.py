@@ -114,7 +114,7 @@ class EvaluationPlan(BaseModel):
 
 
 class ExecutableCondition(BaseModel):
-    """One typed runtime condition materialized by the trusted Runner."""
+    """One typed runtime condition materialized by the trusted execution tool."""
 
     name: str = Field(
         min_length=1,
@@ -134,7 +134,7 @@ class DeliveryScenario(BaseModel):
     fixture_files: dict[str, str] = Field(default_factory=dict)
     expected_behaviors: list[str] = Field(default_factory=list)
     forbidden_behaviors: list[str] = Field(default_factory=list)
-    # The Orchestrator declares bounded runtime conditions; the Runner validates
+    # The Orchestrator declares bounded runtime conditions; the execution tool validates
     # and materializes them without accepting arbitrary env values or setup code.
     executable_conditions: list[ExecutableCondition] = Field(
         default_factory=list,
@@ -177,8 +177,13 @@ class InterventionCandidate(BaseModel):
 
     name: str
     level: Literal["prompt", "workflow", "tool", "module", "architecture"]
+    # The exact gap this intervention addresses.  This is deliberately narrower
+    # than a broad domain such as "tool use" so a delivered slice does not close
+    # every future improvement in the same area.
+    capability_gap: str = ""
     mechanism: str
     expected_capability_delta: str
+    evidence_refs: list[str] = Field(default_factory=list)
     evidence_strength: int = 1
     benefit: int = 1
     risk: int = 1
@@ -186,6 +191,114 @@ class InterventionCandidate(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     conflicts_with: list[str] = Field(default_factory=list)
     rejected_reason: str = ""
+
+
+class CandidateDiagnosis(BaseModel):
+    """Decision-level evidence for one persistent improvement hypothesis."""
+
+    symptom: str = ""
+    root_cause: str = ""
+    capability_gap: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    uncertainty: str = ""
+
+
+class CandidateIntervention(BaseModel):
+    """The causal mechanism proposed for a backlog hypothesis."""
+
+    level: Literal["prompt", "workflow", "tool", "module", "architecture"]
+    mechanism: str
+    expected_capability_delta: str
+
+
+class CandidatePriority(BaseModel):
+    benefit: int = Field(default=1, ge=1, le=5)
+    risk: int = Field(default=1, ge=1, le=5)
+    effort: int = Field(default=1, ge=1, le=5)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    rank_reason: str = ""
+
+
+class CandidateScope(BaseModel):
+    affected_components: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+
+
+class CandidateHistory(BaseModel):
+    first_seen_loop: int = 0
+    last_reviewed_loop: int = 0
+    previous_attempts: list[str] = Field(default_factory=list)
+    verification_scope: list[str] = Field(default_factory=list)
+    verification_level: Literal[
+        "none", "implemented", "behavior_verified", "delta_demonstrated"
+    ] = "none"
+    disposition_reason: str = ""
+
+
+class BacklogCandidate(BaseModel):
+    """A complete decision-level todo, keyed by a stable id in the backlog."""
+
+    id: str
+    status: Literal["open", "deferred", "attempt_failed", "behavior_verified"] = "open"
+    title: str
+    diagnosis: CandidateDiagnosis
+    intervention: CandidateIntervention
+    priority: CandidatePriority = Field(default_factory=CandidatePriority)
+    scope: CandidateScope = Field(default_factory=CandidateScope)
+    dependencies: list[str] = Field(default_factory=list)
+    conflicts_with: list[str] = Field(default_factory=list)
+    history: CandidateHistory = Field(default_factory=CandidateHistory)
+
+
+class SelectedChangeContract(BaseModel):
+    """The one frozen execution contract selected for this Loop."""
+
+    contract_id: str
+    backlog_item_id: str
+    backlog_revision: int = Field(default=1, ge=1)
+    objective: str
+    rationale: str = ""
+    diagnosis: CandidateDiagnosis
+    intervention: CandidateIntervention
+    inputs: list[ContractClause] = Field(default_factory=list)
+    expected_outputs: list[ContractClause] = Field(default_factory=list)
+    required_behaviors: list[ContractClause] = Field(default_factory=list)
+    implementation_constraints: list[ContractClause] = Field(default_factory=list)
+    invariants: list[ContractClause] = Field(default_factory=list)
+    prohibited_shortcuts: list[ContractClause] = Field(default_factory=list)
+    affected_components: list[str] = Field(default_factory=list)
+    allowed_write_paths: list[str] = Field(default_factory=list)
+    reviewer_focus: list[str] = Field(default_factory=list)
+    required_safety_properties: list[Literal["path_confinement"]] = Field(
+        default_factory=list
+    )
+    acceptance_criteria: list[AcceptanceCriterion] = Field(default_factory=list)
+    delivery_run: list[str] = Field(default_factory=list)
+    delivery_scenarios: list[DeliveryScenario] = Field(default_factory=list)
+    delivery_checklist: list[str] = Field(default_factory=list)
+    rollback_plan: str = ""
+
+    def as_task(self) -> ImprovementTask:
+        """Compatibility view for the existing serial Writer/Reviewer executor."""
+
+        return ImprovementTask(
+            id=self.contract_id,
+            candidate=self.backlog_item_id,
+            description=self.objective,
+            rationale=self.rationale,
+            capability_change=self.intervention.expected_capability_delta,
+            required_behaviors=[*self.inputs, *self.expected_outputs, *self.required_behaviors],
+            implementation_constraints=self.implementation_constraints,
+            invariants=self.invariants,
+            prohibited_shortcuts=self.prohibited_shortcuts,
+            affected_components=self.affected_components,
+            reviewer_focus=self.reviewer_focus,
+            required_safety_properties=self.required_safety_properties,
+            dependencies=[],
+            acceptance_criteria_ids=[
+                criterion.id for criterion in self.acceptance_criteria
+            ],
+        )
 
 
 class ImprovementBatchBudget(BaseModel):
@@ -234,6 +347,15 @@ class ImprovementProposal(BaseModel):
     # an RFC-style, evidence-grounded change proposal (design doc section 6.1).
     summary: str
     problem_statement: str
+    # Whole-picture boundaries. Implementations may deviate from suggested paths,
+    # but Writer/Reviewer/Deliverer must not violate these clauses.
+    proposal_guardrails: list[ContractClause] = Field(default_factory=list)
+    # New decision interface. Backlog items are decision-level hypotheses; only the
+    # selected item is expanded into an execution-level contract.
+    candidate_backlog: dict[str, BacklogCandidate] = Field(default_factory=dict)
+    selected_candidate_id: str = ""
+    selected_change_contract: SelectedChangeContract | None = None
+    # Legacy analysis/task fields remain readable while stored runs migrate.
     analysis: OrchestratorAnalysis = Field(default_factory=OrchestratorAnalysis)
     evidence: list[Evidence] = Field(default_factory=list)
     goals: list[str] = Field(default_factory=list)
@@ -256,15 +378,136 @@ class ImprovementProposal(BaseModel):
     # System-level integration/smoke commands for delivering the changed agent package.
     # Generated-code capability tasks live in the separate post-run eval harness.
     delivery_run: list[str] = Field(default_factory=list)
-    # Frozen, capability-specific end-to-end runs. The Runner creates each isolated
-    # fixture and substitutes {prompt}/{workspace} into the argv command.
+    # Frozen, capability-specific end-to-end runs. The Deliverer chooses when to invoke
+    # them; the execution tool creates an isolated fixture and substitutes only the
+    # placeholders explicitly present in the argv command.
     delivery_scenarios: list[DeliveryScenario] = Field(default_factory=list)
     # High-level system requirements the Deliverer checks against the whole-loop diff.
-    # Runtime command facts are handled by the deterministic delivery/commit gate.
+    # Runtime facts are gathered by Deliverer tools; universal failures remain hard gates.
     delivery_checklist: list[str] = Field(default_factory=list)
     evaluation_plan: EvaluationPlan | None = None
     rollback_plan: str = ""
     alternatives_considered: list[str] = Field(default_factory=list)
+
+    def execution_contract(self) -> SelectedChangeContract | None:
+        """Return the canonical contract, synthesizing old Proposal records lazily."""
+
+        if self.selected_change_contract is not None:
+            return self.selected_change_contract
+        if not self.tasks:
+            return None
+        task = self.tasks[0]
+        selected_name = (
+            self.analysis.selected_candidate or task.candidate or task.id
+        )
+        candidate = next(
+            (
+                item
+                for item in self.analysis.candidates
+                if item.name == selected_name
+            ),
+            None,
+        )
+        finding = self.analysis.findings[0] if self.analysis.findings else None
+        capability_gap = (
+            candidate.capability_gap
+            if candidate and candidate.capability_gap
+            else finding.capability_gap
+            if finding
+            else task.capability_change or task.description
+        )
+        diagnosis = CandidateDiagnosis(
+            symptom=finding.symptom if finding else "",
+            root_cause=finding.root_cause if finding else task.rationale,
+            capability_gap=capability_gap,
+            evidence_refs=(
+                candidate.evidence_refs
+                if candidate and candidate.evidence_refs
+                else finding.evidence_refs
+                if finding
+                else []
+            ),
+            uncertainty=finding.uncertainty if finding else "",
+        )
+        intervention = CandidateIntervention(
+            level=candidate.level if candidate else "workflow",
+            mechanism=(
+                self.analysis.causal_mechanism
+                or candidate.mechanism
+                if candidate
+                else self.analysis.causal_mechanism or task.rationale or task.description
+            ),
+            expected_capability_delta=(
+                candidate.expected_capability_delta
+                if candidate
+                else self.analysis.expected_capability_delta
+                or task.capability_change
+                or task.description
+            ),
+        )
+        return SelectedChangeContract(
+            contract_id=task.id,
+            backlog_item_id=selected_name,
+            objective=task.description,
+            rationale=task.rationale,
+            diagnosis=diagnosis,
+            intervention=intervention,
+            required_behaviors=task.required_behaviors,
+            implementation_constraints=task.implementation_constraints,
+            invariants=task.invariants,
+            prohibited_shortcuts=task.prohibited_shortcuts,
+            affected_components=task.affected_components,
+            allowed_write_paths=self.allowed_write_paths,
+            reviewer_focus=task.reviewer_focus,
+            required_safety_properties=task.required_safety_properties,
+            acceptance_criteria=[
+                criterion
+                for criterion in self.acceptance_criteria
+                if criterion.id in task.acceptance_criteria_ids
+            ],
+            delivery_run=self.delivery_run,
+            delivery_scenarios=self.delivery_scenarios,
+            delivery_checklist=self.delivery_checklist,
+            rollback_plan=self.rollback_plan,
+        )
+
+    def execution_tasks(self) -> list[ImprovementTask]:
+        if self.selected_change_contract is not None:
+            task = self.selected_change_contract.as_task()
+            # Proposal guardrails are projected into the shared Writer/Reviewer
+            # invariant view. They remain whole-picture boundaries rather than
+            # implementation prescriptions.
+            return [
+                task.model_copy(
+                    update={
+                        "invariants": [
+                            *self.proposal_guardrails,
+                            *task.invariants,
+                        ]
+                    }
+                )
+            ]
+        return self.tasks
+
+    def contract_acceptance_criteria(self) -> list[AcceptanceCriterion]:
+        if self.selected_change_contract is not None:
+            return self.selected_change_contract.acceptance_criteria
+        return self.acceptance_criteria
+
+    def contract_delivery_run(self) -> list[str]:
+        if self.selected_change_contract is not None:
+            return self.selected_change_contract.delivery_run
+        return self.delivery_run
+
+    def contract_delivery_scenarios(self) -> list[DeliveryScenario]:
+        if self.selected_change_contract is not None:
+            return self.selected_change_contract.delivery_scenarios
+        return self.delivery_scenarios
+
+    def contract_allowed_write_paths(self) -> list[str]:
+        if self.selected_change_contract is not None:
+            return self.selected_change_contract.allowed_write_paths
+        return self.allowed_write_paths
 
 
 class FrozenProposal(BaseModel):
