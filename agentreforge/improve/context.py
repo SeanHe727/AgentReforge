@@ -62,6 +62,24 @@ _TARGET_RUN_SEMANTICS = (
 )
 
 
+def _same_git_commit(left: str, right: str) -> bool:
+    """Compare full or abbreviated Git object IDs without accepting tiny prefixes."""
+
+    if not left or not right:
+        return False
+    normalized_left = left.casefold()
+    normalized_right = right.casefold()
+    if normalized_left == normalized_right:
+        return True
+    return (
+        min(len(normalized_left), len(normalized_right)) >= 7
+        and (
+            normalized_left.startswith(normalized_right)
+            or normalized_right.startswith(normalized_left)
+        )
+    )
+
+
 class RepositoryContext(BaseModel):
     root: str
     manifests: list[str] = Field(default_factory=list)
@@ -301,11 +319,7 @@ def summarize_target_trajectory(
                 evidence_refs=refs,
                 evidence_source=evidence_source,
                 target_commit=target_commit,
-                is_current=bool(
-                    current_commit
-                    and target_commit
-                    and target_commit == current_commit
-                ),
+                is_current=_same_git_commit(target_commit, current_commit),
             )
         )
     return summaries, evidence_catalog[:_MAX_EVIDENCE_RECORDS]

@@ -350,6 +350,28 @@ def test_target_summary_marks_only_current_commit_evidence_current():
     assert by_id["delivered"].is_current
 
 
+def test_target_summary_matches_full_and_abbreviated_commit_ids():
+    summaries, _ = summarize_target_trajectory(
+        [
+            {
+                "run_id": "full-sha",
+                "type": "target_run_started",
+                "target_commit": "1cf783bac54572c3ac4b8749d3cc088f7f3c85e7",
+            },
+            {
+                "run_id": "unrelated",
+                "type": "target_run_started",
+                "target_commit": "1cf783c000000000000000000000000000000000",
+            },
+        ],
+        current_commit="1cf783bac545",
+    )
+
+    by_id = {summary.run_id: summary for summary in summaries}
+    assert by_id["full-sha"].is_current
+    assert not by_id["unrelated"].is_current
+
+
 def test_record_store_writes_run_loop_and_diff(tmp_path):
     run = RecursiveRunRecord(
         run_id="reforge-1",
