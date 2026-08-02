@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -302,7 +302,17 @@ class ImprovementPipeline:
     async def _preflight(self, wt: WorktreeSession, intent: str, traj: int) -> dict[str, Any]:
         """A Run Manifest: what this Recursive Run is operating on and with."""
         # a worktree is created from a COMMIT, so it excludes uncommitted changes.
-        status = await _run_git("status", "--porcelain", cwd=self.cwd)
+        # AgentReforge creates its own runtime state inside the target repository.
+        # That state must not make an otherwise-clean target look dirty.
+        status = await _run_git(
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).agentreforge/**",
+            cwd=self.cwd,
+        )
         return {
             "run_id": datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f"),
             "intent": intent[:200],
@@ -1309,25 +1319,27 @@ def _changed_paths_from_diff(diff: str) -> list[str]:
 
 def _as_partial(success: PipelineResult, terminal: PipelineResult) -> PipelineResult:
     """Return the last verified version without hiding the later loop failure."""
-    success.stage = "partially_delivered"
-    success.terminal_stage = terminal.stage
-    success.terminal_loop = terminal.loop
-    success.terminal_report_path = terminal.report_path
-    success.terminal_error = terminal.error or (
+    result = replace(success)
+    result.stage = "partially_delivered"
+    result.terminal_stage = terminal.stage
+    result.terminal_loop = terminal.loop
+    result.terminal_report_path = terminal.report_path
+    result.terminal_error = terminal.error or (
         "; ".join(terminal.delivery.reasons) if terminal.delivery else ""
     )
-    return success
+    return result
 
 
 def _as_converged(success: PipelineResult, terminal: PipelineResult) -> PipelineResult:
     """Preserve the last delivered commit when the next Loop intentionally abstains."""
 
-    success.stage = "converged"
-    success.terminal_stage = terminal.stage
-    success.terminal_loop = terminal.loop
-    success.terminal_report_path = terminal.report_path
-    success.terminal_error = terminal.error
-    return success
+    result = replace(success)
+    result.stage = "converged"
+    result.terminal_stage = terminal.stage
+    result.terminal_loop = terminal.loop
+    result.terminal_report_path = terminal.report_path
+    result.terminal_error = terminal.error
+    return result
 
 
 def _repair_instruction(delivery: Delivery) -> str:

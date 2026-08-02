@@ -325,6 +325,7 @@ def test_later_loop_failure_is_reported_as_partial_delivery():
     result = _as_partial(success, terminal)
 
     assert result.stage == "partially_delivered"
+    assert success.stage == "delivered"
     assert result.version.verified_commit == "verified"
     assert result.terminal_loop == 1
     assert result.terminal_stage == "rejected_delivery"
@@ -351,6 +352,7 @@ def test_later_orchestrator_abstention_is_graceful_convergence():
     result = _as_converged(success, abstention)
 
     assert result.stage == "converged"
+    assert success.stage == "delivered"
     assert result.version.verified_commit == "verified"
     assert result.terminal_loop == 3
     assert result.terminal_stage == "abstained"
