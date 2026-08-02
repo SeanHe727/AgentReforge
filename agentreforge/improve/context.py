@@ -90,12 +90,28 @@ class RepositoryContext(BaseModel):
     language_counts: dict[str, int] = Field(default_factory=dict)
 
 
+class CurrentRunAlert(BaseModel):
+    """A salient factual index of unresolved evidence on the current commit."""
+
+    run_id: str
+    outcome: str
+    task_prompt: str
+    step_budget_exhausted: bool
+    evaluation_passed: bool | None
+    evaluation_summary: str
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
 class OrchestratorContext(BaseModel):
     """Everything that must be present before Orchestrator reasoning starts."""
 
     improvement_intent: str
     target_run_semantics: str = _TARGET_RUN_SEMANTICS
     target_agent_runs: list[TargetRunSummary] = Field(default_factory=list)
+    # This is an attention index, not a policy gate or ranking decision. It
+    # prevents terminal current-version evidence from being buried beneath
+    # many successful or stale runs.
+    current_run_alerts: list[CurrentRunAlert] = Field(default_factory=list)
     # AgentReforge's own history; never mixed into target_agent_runs.
     previous_reforge_loops: list[ReforgeLoopSummary] = Field(default_factory=list)
     # Dynamic hypothesis list reconstructed from every previous proposal.  The
@@ -141,6 +157,25 @@ class OrchestratorContextBuilder:
         return OrchestratorContext(
             improvement_intent=intent,
             target_agent_runs=summaries,
+            current_run_alerts=[
+                CurrentRunAlert(
+                    run_id=summary.run_id,
+                    outcome=summary.outcome,
+                    task_prompt=summary.task_prompt,
+                    step_budget_exhausted=summary.step_budget_exhausted,
+                    evaluation_passed=summary.evaluation_passed,
+                    evaluation_summary=summary.evaluation_summary,
+                    evidence_refs=summary.evidence_refs,
+                )
+                for summary in summaries
+                if summary.is_current
+                and (
+                    summary.outcome
+                    in {"failed_verification", "incomplete", "error", "stopped"}
+                    or summary.stopped_early
+                    or summary.evaluation_passed is False
+                )
+            ],
             previous_reforge_loops=loop_summaries,
             improvement_backlog=_build_improvement_backlog(previous_reforge_loops),
             repository=self._repository_context(),

@@ -38,6 +38,9 @@ You receive two strictly separated histories:
    with `target_commit`, `evidence_source`, and `is_current`. Read its structured
    `outcome`, `stopped_early`, `step_budget_exhausted`, `evaluation_passed`, and
    `evaluation_summary` fields before interpreting free-form response text.
+   `current_run_alerts` is a compact attention index of unresolved outcomes on the
+   current target commit. It is not a ranking gate, but every alert requires an
+   explicit diagnosis or evidence-based disposition before selection.
 2. `previous_reforge_loops`: what AgentReforge itself planned, wrote, reviewed,
    delivered, and committed earlier in THIS recursive run. Use these to avoid
    repetition and plan the next improvement. Never treat Reforge workflow events as
@@ -99,6 +102,8 @@ PHASE 2 — DIAGNOSE
 - Account for every current `failed_verification`, incomplete, step-budget, or error outcome.
   It need not be selected, but its direct cause must become a Candidate hypothesis or receive
   an explicit evidence-based disposition explaining why it is non-actionable or lower value.
+  Begin this audit from `current_run_alerts`; do not let a newer run from a different
+  `target_commit` silently displace a current-commit alert.
 - A missing action in one trajectory is not automatically a missing system feature.
   Check the source to learn whether the failure is instruction, workflow, tool, state,
   or architecture related.

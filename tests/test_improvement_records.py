@@ -153,6 +153,7 @@ def test_context_keeps_target_and_reforge_histories_separate(tmp_path):
     assert context.target_agent_runs[0].evidence_source == "baseline"
     assert context.target_agent_runs[0].target_commit == "abc"
     assert context.target_agent_runs[0].is_current
+    assert context.current_run_alerts == []
     assert context.previous_reforge_loops[0].loop_id == "reforge-1/loop_0"
     assert context.previous_reforge_loops[0].component_status == {
         "orchestrator": "proceed"
@@ -370,6 +371,52 @@ def test_target_summary_matches_full_and_abbreviated_commit_ids():
     by_id = {summary.run_id: summary for summary in summaries}
     assert by_id["full-sha"].is_current
     assert not by_id["unrelated"].is_current
+
+
+def test_context_surfaces_current_terminal_run_as_attention_alert(tmp_path):
+    context = OrchestratorContextBuilder(str(tmp_path)).build(
+        intent="improve the coder",
+        target_trajectory=[
+            {
+                "run_id": "current-failure",
+                "type": "target_run_started",
+                "task_prompt": "implement the complete queue contract",
+                "target_commit": "1cf783bac54572c3ac4b8749d3cc088f7f3c85e7",
+            },
+            {
+                "run_id": "current-failure",
+                "type": "done",
+                "outcome": "completed",
+                "final_response": "(stopped: reached max steps)",
+            },
+            {
+                "run_id": "current-failure",
+                "type": "evaluation_result",
+                "passed": False,
+                "content": "CLI contract remains incomplete",
+            },
+            {
+                "run_id": "stale-failure",
+                "type": "target_run_started",
+                "target_commit": "2222222222222222222222222222222222222222",
+            },
+            {
+                "run_id": "stale-failure",
+                "type": "error",
+                "error": "python missing",
+            },
+        ],
+        previous_reforge_loops=[],
+        run_manifest={"loop_base": "1cf783bac545"},
+    )
+
+    assert [alert.run_id for alert in context.current_run_alerts] == [
+        "current-failure"
+    ]
+    alert = context.current_run_alerts[0]
+    assert alert.outcome == "failed_verification"
+    assert alert.step_budget_exhausted
+    assert alert.evaluation_passed is False
 
 
 def test_record_store_writes_run_loop_and_diff(tmp_path):
