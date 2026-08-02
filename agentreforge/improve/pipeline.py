@@ -117,6 +117,7 @@ class PipelineResult:
     merged_commit: str | None = None
     report_path: str | None = None
     error: str = ""
+    orchestrator_artifacts: dict[str, Any] = field(default_factory=dict)
     # run-level (set on the final result the caller sees).
     manifest: dict[str, Any] = field(default_factory=dict)
     run_report_path: str | None = None
@@ -379,7 +380,17 @@ class ImprovementPipeline:
                 loop_history=loop_history,
             )
         except ValueError as exc:
-            return PipelineResult(stage="failed", loop=loop_i, error=str(exc))
+            partial_artifacts = {}
+            if orch.last_diagnosis is not None:
+                partial_artifacts["diagnosis"] = orch.last_diagnosis.model_dump(mode="json")
+            if orch.last_selection is not None:
+                partial_artifacts["selection"] = orch.last_selection.model_dump(mode="json")
+            return PipelineResult(
+                stage="failed",
+                loop=loop_i,
+                error=str(exc),
+                orchestrator_artifacts=partial_artifacts,
+            )
 
         # 2. Deterministic gate.
         gate = policy_gate.evaluate(proposal, self.policy)
@@ -888,6 +899,11 @@ def _materialize_loop_record(
                         if proposal.selected_change_contract
                         else None
                     ),
+                    "orchestrator_artifacts": (
+                        proposal.orchestrator_artifacts.model_dump(mode="json")
+                        if proposal.orchestrator_artifacts
+                        else None
+                    ),
                     "tasks": [
                         task.model_dump(mode="json")
                         for task in proposal.execution_tasks()
@@ -895,6 +911,15 @@ def _materialize_loop_record(
                     "evidence": [item.model_dump(mode="json") for item in proposal.evidence],
                     "allowed_write_paths": proposal.contract_allowed_write_paths(),
                 },
+            )
+        )
+    elif result.orchestrator_artifacts:
+        components.append(
+            ComponentRecord(
+                component="orchestrator",
+                status="failed",
+                summary="Orchestrator stopped after a partial typed stage",
+                details={"orchestrator_artifacts": result.orchestrator_artifacts},
             )
         )
     if result.gate is not None:
@@ -985,7 +1010,7 @@ def _materialize_loop_record(
             ]
         )
 
-    diagnosis = {}
+    diagnosis = dict(result.orchestrator_artifacts)
     if proposal is not None:
         diagnosis = (
             {
@@ -1003,6 +1028,11 @@ def _materialize_loop_record(
                     else None
                 ),
                 "selected_candidate_id": proposal.selected_candidate_id,
+                "orchestrator_artifacts": (
+                    proposal.orchestrator_artifacts.model_dump(mode="json")
+                    if proposal.orchestrator_artifacts
+                    else None
+                ),
             }
             if proposal.candidate_backlog
             else proposal.analysis.model_dump(mode="json")
@@ -1446,6 +1476,29 @@ def render_report(result: PipelineResult) -> str:
         lines.append(f"- **Repair rounds:** {result.repairs}")
     if result.merged_commit:
         lines.append(f"- **Merged:** {result.merged_commit[:12]}")
+
+    if p and p.orchestrator_artifacts:
+        triage = p.orchestrator_artifacts.diagnosis
+        lines += [
+            "",
+            "## Orchestrator evidence triage",
+            "",
+            triage.whole_picture_summary or "(no whole-picture summary)",
+        ]
+        for disposition in triage.alert_dispositions:
+            lines.append(
+                f"- `{disposition.run_id}` → **{disposition.disposition}** — "
+                f"{disposition.agent_level_interpretation} "
+                f"({disposition.disposition_reason})"
+            )
+    elif result.orchestrator_artifacts.get("diagnosis"):
+        triage = result.orchestrator_artifacts["diagnosis"]
+        lines += [
+            "",
+            "## Partial Orchestrator evidence triage",
+            "",
+            str(triage.get("whole_picture_summary") or "(no whole-picture summary)"),
+        ]
 
     if p and p.preliminary_ranking:
         lines += ["", "## Orchestrator decision review", "", "### Preliminary ranking"]

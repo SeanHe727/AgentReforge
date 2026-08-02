@@ -127,21 +127,37 @@ responsibility. It compares mechanisms and expected capability deltas rather tha
 Candidate-name equality. A renamed refinement of a delivered capability requires new
 current-commit evidence; stale baseline behavior is not sufficient justification.
 
-The Orchestrator follows a fixed reasoning workflow:
+The Orchestrator is one logical component but does not force all reasoning into
+one model call. Its three typed stages use clean contexts and communicate through
+durable artifacts:
 
 ```text
-Orient -> Triage problems independently of solution cost
-       -> Diagnose competing root-cause hypotheses
-       -> Generate interventions at multiple leverage levels
-       -> Fill problem/causal/impact/evaluability scorecards
-       -> Produce a qualitative preliminary Candidate ranking
-       -> Compare Top-2 directly (or one Candidate against DEFER)
-       -> Exclude completed achievements and Delivery-only reward hacks
-       -> Select one unsolved Candidate
-       -> Plan one bounded Task
-       -> Freeze runnable Delivery scenarios before implementation
-       -> Validate the Task and acceptance contracts
+Deterministic Context Compiler
+  -> Evidence Triage
+       input: current alerts, compact run summaries, achievements, repository map
+       output: DiagnosisBoard (alert dispositions + agent-level ProblemCases)
+  -> Candidate Selection
+       input: DiagnosisBoard, backlog, one-Loop budget, repository summary
+       output: SelectionDecision (Candidates + scorecards + Top-2 + frozen winner)
+  -> Contract Expansion
+       input: frozen winner, relevant evidence references, repository map
+       output: ContractExpansion (one bounded contract + frozen scenarios)
+  -> deterministic coordinator joins SelectionDecision + ContractExpansion
+       into the final ImprovementProposal
 ```
+
+The stages do not share an accumulating chat history. They exchange typed artifacts,
+and detailed target events remain behind a read-only drill-down tool. Triage must
+account for every current terminal alert, but it is free to defer one with an
+evidence-based reason. The task workspace's missing domain feature is a symptom:
+ProblemCases and Candidates must describe reusable target-agent capability and may
+only name target-repository components. Schema or completeness failures are repaired
+inside the producing stage rather than terminating the Loop.
+
+Selection cannot be changed during Contract Expansion or later acceptance repair.
+The coordinator reattaches the frozen `SelectionDecision` deterministically, so
+contract formatting and scenario revisions cannot switch to an easier Candidate.
+Partial Diagnosis/Selection artifacts are persisted even if a later stage fails.
 
 The scorecards are structured LLM deliberation, not a deterministic weighted
 score or policy gate. Problem severity and evidence are assessed before
@@ -678,7 +694,12 @@ async def run(request: ImproveRequest, ctx: RunContext) -> ImproveRun:
             previous_loop_outcomes=run.loop_outcomes,
             ctx=loop_ctx,
         )
-        proposal = await analyzer.propose(request.intent, evidence, loop_ctx)
+        diagnosis = await analyzer.triage(request.intent, evidence, loop_ctx)
+        selection = await analyzer.select(diagnosis, loop_ctx)
+        if selection.decision == "abstain":
+            return run.converged(selection.decision_reason)
+        contract = await analyzer.expand_contract(selection, loop_ctx)
+        proposal = assemble_proposal(diagnosis, selection, contract)
 
         proposal_validation = validate_proposal(proposal)
         plan_validation = validate_task_dag(proposal.tasks)

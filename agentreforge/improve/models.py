@@ -328,6 +328,69 @@ class CandidatePairwiseComparison(BaseModel):
     decision_reason: str
 
 
+class AlertDisposition(BaseModel):
+    """Triage's explicit accounting for one current-version run alert."""
+
+    run_id: str
+    observed_failure: str
+    agent_level_interpretation: str
+    likely_causes: list[str] = Field(default_factory=list)
+    disposition: Literal[
+        "candidate_problem",
+        "deferred",
+        "unsupported",
+        "already_resolved",
+    ]
+    disposition_reason: str
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class ProblemCase(BaseModel):
+    """An evidence-grounded problem, intentionally separated from its solution."""
+
+    id: str
+    symptom: str
+    capability_gap: str
+    likely_root_causes: list[str] = Field(default_factory=list)
+    affected_scope: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    uncertainty: str = ""
+
+
+class DiagnosisBoard(BaseModel):
+    """Stage-one artifact: evidence dispositions and agent-level problems."""
+
+    alert_dispositions: list[AlertDisposition] = Field(default_factory=list)
+    problem_cases: dict[str, ProblemCase] = Field(default_factory=dict)
+    retired_problems: dict[str, str] = Field(default_factory=dict)
+    whole_picture_summary: str = ""
+
+
+class SelectionDecision(BaseModel):
+    """Stage-two artifact: candidate generation, ranking, and one selection."""
+
+    summary: str
+    problem_statement: str
+    candidate_backlog: dict[str, BacklogCandidate] = Field(default_factory=dict)
+    preliminary_ranking: list[CandidateRankingEntry] = Field(default_factory=list)
+    top_two_comparison: CandidatePairwiseComparison | None = None
+    selected_candidate_id: str = ""
+    deferred_candidates: dict[str, str] = Field(default_factory=dict)
+    benefit: int = Field(ge=1, le=5)
+    risk: int = Field(ge=1, le=5)
+    effort: int = Field(ge=1, le=5)
+    confidence: float = Field(ge=0, le=1)
+    decision: Literal["proceed", "abstain", "needs_human"]
+    decision_reason: str
+
+
+class OrchestratorArtifacts(BaseModel):
+    """Auditable internal artifacts from the logical three-stage Orchestrator."""
+
+    diagnosis: DiagnosisBoard
+    selection: SelectionDecision
+
+
 class SelectedChangeContract(BaseModel):
     """The one frozen execution contract selected for this Loop."""
 
@@ -377,6 +440,19 @@ class SelectedChangeContract(BaseModel):
                 criterion.id for criterion in self.acceptance_criteria
             ],
         )
+
+
+class ContractExpansion(BaseModel):
+    """Stage-three artifact; the coordinator joins it with frozen Selection."""
+
+    proposal_guardrails: list[ContractClause] = Field(default_factory=list)
+    selected_change_contract: SelectedChangeContract
+    evidence: list[Evidence] = Field(default_factory=list)
+    goals: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    affected_components: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    alternatives_considered: list[str] = Field(default_factory=list)
 
 
 class ImprovementBatchBudget(BaseModel):
@@ -437,6 +513,9 @@ class ImprovementProposal(BaseModel):
     top_two_comparison: CandidatePairwiseComparison | None = None
     selected_candidate_id: str = ""
     selected_change_contract: SelectedChangeContract | None = None
+    # Added by the Orchestrator coordinator after contract expansion. The LLM
+    # that expands the contract does not need to reproduce these artifacts.
+    orchestrator_artifacts: OrchestratorArtifacts | None = None
     # Legacy analysis/task fields remain readable while stored runs migrate.
     analysis: OrchestratorAnalysis = Field(default_factory=OrchestratorAnalysis)
     evidence: list[Evidence] = Field(default_factory=list)

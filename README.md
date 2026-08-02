@@ -12,7 +12,8 @@ rolled back.
 
 - A general ReAct coding agent with local tools, SQLite memory/code index, MCP,
   and a FastAPI runtime.
-- One evidence-grounded improvement Orchestrator.
+- One evidence-grounded improvement Orchestrator with isolated Triage,
+  Candidate Selection, and Contract Expansion stages.
 - Two governance modes: `autonomous` and `supervised`.
 - Recursive Runs with one branch/worktree for their full lifetime.
 - One commit per delivered Loop.
@@ -29,7 +30,10 @@ rolled back.
 
 ```text
 User intent + target trajectory + current source
-    -> Orchestrator diagnoses and ranks Candidates
+    -> Orchestrator Triage audits current-run alerts and agent-level problems
+    -> Candidate Selection generates, scores, and compares interventions
+    -> Contract Expansion expands only the frozen winner
+    -> coordinator deterministically assembles the final ImprovementProposal
     -> exclude completed achievements and Delivery-only reward hacks
     -> select one unsolved Candidate and create one bounded Task
     -> validate proposal schema, IDs, references, and the Task plan

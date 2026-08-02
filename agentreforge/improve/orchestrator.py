@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import BaseModel
+
 from ..agent.query import query
 from ..llm.base import LlmClient
 from ..llm.collect import collect_text
@@ -26,7 +28,13 @@ from ..tools.registry import ToolRegistry
 from ..types import Message
 from .context import OrchestratorContext, OrchestratorContextBuilder
 from .history_index import ImprovementHistoryIndex
-from .models import ImprovementProposal
+from .models import (
+    ContractExpansion,
+    DiagnosisBoard,
+    ImprovementProposal,
+    OrchestratorArtifacts,
+    SelectionDecision,
+)
 from .plan_validator import validate_plan_tool
 from .records import ReforgeLoopRecord
 
@@ -388,6 +396,154 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
   dependencies[], decision_reason, alternatives_considered[]"""
 
 
+TRIAGE_PROMPT = """You are the Evidence Triage stage inside one improvement Orchestrator.
+You diagnose the target agent; you do not propose code changes, rank solutions, design
+tests, or write an ImprovementProposal.
+
+Treat Git identity fields as deterministic facts. A target-agent run evaluates
+`target_commit` on a disposable TASK WORKSPACE. Failure of the generated artifact is
+capability evidence about that agent version; the task files do not need to exist in
+the TARGET AGENT REPOSITORY for the agent-level failure to be actionable.
+The task artifact's missing feature is a SYMPTOM, not the improvement itself. Diagnose
+the reusable TARGET AGENT capability that caused incomplete work (for example planning,
+tool use, state tracking, cross-component completion, or verification budgeting).
+Never propose adding the task's domain feature or task-workspace files to the target
+agent repository. `ProblemCase.affected_scope` names only target-agent source components
+or abstract agent capabilities visible in the supplied repository map.
+
+Audit every `current_run_alert`. For each alert, record the observed failure, its
+agent-level interpretation, plausible direct causes, evidence references, and exactly
+one disposition. A terminal failure may be deferred when evidence cannot identify an
+actionable agent-level problem, but "different task workspace" is not by itself a
+valid reason. Separate symptoms from hypotheses and state uncertainty.
+
+Use current runs, the whole source-visible architecture, the dynamic backlog,
+achievements, and failed attempts. Current-commit evidence is authoritative; runs in
+`non_current_run_ids` are historical only. Use read-only tools to inspect source or a
+cited full event when needed. Output ONLY one DiagnosisBoard JSON object:
+{
+  "alert_dispositions": [{
+    "run_id": str, "observed_failure": str, "agent_level_interpretation": str,
+    "likely_causes": [str],
+    "disposition": "candidate_problem|deferred|unsupported|already_resolved",
+    "disposition_reason": str, "evidence_refs": [str]
+  }],
+  "problem_cases": {problem_id: {
+    "id": same problem_id, "symptom": str, "capability_gap": str,
+    "likely_root_causes": [str], "affected_scope": [str],
+    "evidence_refs": [str], "uncertainty": str
+  }},
+  "retired_problems": {problem_id: reason},
+  "whole_picture_summary": str
+}
+Every current alert must appear exactly once in alert_dispositions."""
+
+
+SELECTION_PROMPT = """You are the Candidate Selection stage inside one improvement
+Orchestrator. Evidence triage is already complete. Generate interventions from the
+DiagnosisBoard, compare them, and select exactly one bounded improvement or abstain.
+Do not design a Change Contract or Delivery Scenario.
+
+Treat DiagnosisBoard evidence/commit scope as fixed input. You may inspect cited source
+or evidence, but do not silently discard a problem or relabel current and non-current
+runs. Generate 1-3 viable Candidates at prompt, workflow, tool/module, or architecture
+levels when supported. Each Candidate uses the complete BacklogCandidate schema.
+Candidates improve reusable behavior of the TARGET AGENT source in `repository`; they
+must never implement the disposable task workspace's domain feature inside the agent
+repository. Candidate affected_components must name real target-repository paths or
+abstract agent components from the supplied map.
+
+Fill the problem, causal, impact, and evaluability scorecards before ranking. Scores
+are advisory (1 low, 5 high); NEVER compute a weighted total. Rank by problem
+evidence/severity, causal fit, expected cross-task outcome delta,
+observability/discriminability, one-Loop feasibility, then risk/effort. Avoid changes
+whose expected effect is too small or noisy to distinguish from model variance.
+
+Produce a preliminary ranking for every viable Candidate, then compare ranks 1 and 2
+pairwise. When only one Candidate is viable, compare it with literal DEFER. Pairwise
+may overturn rank 1. One Loop selects one Candidate. Output ONLY one
+SelectionDecision JSON object with:
+summary, problem_statement, candidate_backlog, preliminary_ranking,
+top_two_comparison, selected_candidate_id, deferred_candidates, benefit, risk, effort,
+confidence, decision (proceed|abstain|needs_human), and decision_reason.
+Each candidate_backlog value must use this object shape (never replace nested objects
+with prose strings):
+{
+  "id": str, "status": "open|deferred|attempt_failed|behavior_verified", "title": str,
+  "diagnosis": {"symptom": str, "root_cause": str, "capability_gap": str,
+    "evidence_refs": [str], "uncertainty": str},
+  "intervention": {"level": "prompt|workflow|tool|module|architecture",
+    "mechanism": str, "expected_capability_delta": str},
+  "priority": {
+    "problem": {"evidence_strength": 1-5, "failure_severity": 1-5,
+      "recurrence": 1-5, "cross_task_impact": 1-5, "evidence_freshness": 1-5,
+      "user_relevance": 1-5, "assessment": str},
+    "causal": {"root_cause_confidence": 1-5, "intervention_fit": 1-5,
+      "competing_hypotheses": [str], "falsification_condition": str},
+    "impact": {"expected_outcome_impact": 1-5, "generality": 1-5,
+      "one_loop_feasibility": 1-5, "regression_risk": 1-5, "effort": 1-5,
+      "expected_delta": str},
+    "evaluability": {"mechanism_observability": 1-5, "outcome_observability": 1-5,
+      "discriminability": 1-5, "attribution_confidence": 1-5,
+      "noise_robustness": 1-5, "evaluation_cost": 1-5,
+      "baseline_prediction": str, "candidate_prediction": str,
+      "observable_difference": str, "confounders": [str]},
+    "benefit": 1-5, "risk": 1-5, "effort": 1-5, "confidence": 0-1,
+    "rank_reason": str
+  },
+  "scope": {"affected_components": [str], "non_goals": [str]},
+  "dependencies": [candidate_id], "conflicts_with": [candidate_id],
+  "history": {"first_seen_loop": int, "last_reviewed_loop": int,
+    "previous_attempts": [str], "verification_scope": [str],
+    "verification_level": "none|implemented|behavior_verified|delta_demonstrated",
+    "disposition_reason": str}
+}
+top_two_comparison contains candidate_a, candidate_b, strongest_case_for_a,
+strongest_case_for_b, comparative_judgments (object of qualitative strings),
+baseline_counterfactual, candidate_counterfactual, winner (the exact winning Candidate
+id), and decision_reason.
+For proceed/needs_human, selected_candidate_id must name a backlog key. For abstain it
+must be empty and top_two_comparison may be null."""
+
+
+CONTRACT_PROMPT = """You are the Contract Expansion stage inside one improvement
+Orchestrator. Selection is already frozen. Expand only `selected_candidate_id` into one
+SelectedChangeContract. Do not re-diagnose, re-rank, choose another Candidate, or
+reproduce the SelectionDecision.
+
+Create one causally coherent Change Contract: objective, rationale,
+diagnosis/intervention snapshots, inputs,
+expected outputs, behaviors, constraints, invariants, prohibited shortcuts, affected
+components, concise allowed write suggestions, reviewer focus, acceptance criteria,
+delivery runs/scenarios, checklist, and rollback plan.
+
+The Contract is guidance for Writer/Reviewer/Deliverer, not a hard file boundary.
+Design one or two frozen end-to-end scenarios only when they can distinguish the
+selected capability. Scenario commands are argv arrays; use {prompt}/{workspace} only
+when the real CLI accepts them. Process claims require trajectory evidence. Safety
+properties are empty by default; path_confinement is declared only when the selected
+change touches that boundary. Call validate_plan once with the single contract id.
+
+Each acceptance criterion is an object with: id, description,
+mode (red_green|invariant|metric_improvement|non_regression|manual),
+check_type (unit|integration|smoke), verification (command|review|manual), command,
+expected_exit_code, required_output_contains, forbidden_output_contains,
+verified_safety_properties, test_level (full|focused|basic), and required.
+Each evidence item is an object with source_type
+(trajectory|test|benchmark|code|log), reference, and observation.
+
+Output ONLY one ContractExpansion JSON object:
+{
+  "proposal_guardrails": [{"id": str, "description": str}],
+  "selected_change_contract": {the complete contract described above},
+  "evidence": [{"source_type": "trajectory|test|benchmark|code|log",
+    "reference": str, "observation": str}],
+  "goals": [str], "non_goals": [str], "affected_components": [str],
+  "dependencies": [str], "alternatives_considered": [str]
+}
+The coordinator—not you—joins this artifact with the frozen SelectionDecision."""
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -402,6 +558,8 @@ class Orchestrator:
         self.cwd = cwd
         self.code_index = code_index
         self.history_index = history_index
+        self.last_diagnosis: DiagnosisBoard | None = None
+        self.last_selection: SelectionDecision | None = None
         # analyst gets read-only tools ONLY — it must never modify code.
         self.registry = _read_only_registry(registry)
         # plus a deterministic DAG check it must run before finalizing its plan.
@@ -428,11 +586,56 @@ class Orchestrator:
         self.registry.register(_reforge_loop_tool(context))
         if self.history_index is not None:
             self.registry.register(_history_tool(context, self.history_index))
-        # 1. run the ReAct loop; collect its final text (the proposal JSON).
-        text = await self._investigate(context, max_turns)
-        # 2. Schema failures happen before the Pipeline can request a semantic
-        # proposal revision, so repair them here with a small bounded retry budget.
-        return await self._parse_proposal_with_repair(text)
+
+        triage_text = await self._investigate_stage(
+            system_prompt=TRIAGE_PROMPT,
+            user_message=_build_triage_request(context),
+            max_turns=max_turns,
+        )
+        diagnosis = await self._parse_stage_with_repair(
+            triage_text,
+            DiagnosisBoard,
+            system_prompt=TRIAGE_PROMPT,
+            stage_name="DiagnosisBoard",
+            validate=lambda board: _validate_triage_coverage(board, context),
+        )
+        self.last_diagnosis = diagnosis
+
+        selection_text = await self._investigate_stage(
+            system_prompt=SELECTION_PROMPT,
+            user_message=_build_selection_request(context, diagnosis),
+            max_turns=max_turns,
+        )
+        selection = await self._parse_stage_with_repair(
+            selection_text,
+            SelectionDecision,
+            system_prompt=SELECTION_PROMPT,
+            stage_name="SelectionDecision",
+            validate=lambda item: _validate_selection(item, context),
+        )
+        self.last_selection = selection
+
+        if selection.decision == "abstain":
+            proposal = _abstaining_proposal(selection)
+        else:
+            contract_text = await self._investigate_stage(
+                system_prompt=CONTRACT_PROMPT,
+                user_message=_build_contract_request(context, diagnosis, selection),
+                max_turns=max_turns,
+            )
+            expansion = await self._parse_stage_with_repair(
+                contract_text,
+                ContractExpansion,
+                system_prompt=CONTRACT_PROMPT,
+                stage_name="ContractExpansion",
+                validate=lambda item: _validate_contract_selection(item, selection),
+            )
+            proposal = _proposal_from_contract(selection, expansion)
+
+        # Decision artifacts are coordinator-owned and cannot drift during
+        # contract expansion. The final Proposal remains the unchanged downstream
+        # interface used by Gate, Writer, Reviewer, and Deliverer.
+        return _attach_frozen_decision(proposal, diagnosis, selection)
 
     async def revise(self, proposal: ImprovementProposal, problem: str) -> ImprovementProposal:
         """Re-generate the proposal to fix a specific problem (e.g. an invalid DAG)."""
@@ -450,7 +653,15 @@ class Orchestrator:
         text = await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
         )
-        return await self._parse_proposal_with_repair(text)
+        corrected = await self._parse_proposal_with_repair(text)
+        artifacts = proposal.orchestrator_artifacts
+        if artifacts is None:
+            return corrected
+        return _attach_frozen_decision(
+            corrected,
+            artifacts.diagnosis,
+            artifacts.selection,
+        )
 
     async def _parse_proposal_with_repair(
         self,
@@ -470,17 +681,50 @@ class Orchestrator:
                 candidate = await self._repair(candidate, str(exc))
         raise AssertionError("unreachable")
 
-    async def _investigate(
+    async def _parse_stage_with_repair(
         self,
-        context: OrchestratorContext,
+        text: str,
+        model_cls: type[BaseModel],
+        *,
+        system_prompt: str,
+        stage_name: str,
+        validate,
+        max_repairs: int = 2,
+    ):
+        """Repair only the stage whose typed handoff is invalid."""
+
+        candidate = text
+        for repair_i in range(max_repairs + 1):
+            try:
+                parsed = parse_json_model(candidate, model_cls)
+                problems = validate(parsed)
+                if problems:
+                    raise ValueError("; ".join(problems))
+                return parsed
+            except ValueError as exc:
+                if repair_i >= max_repairs:
+                    raise
+                candidate = await self._repair_stage(
+                    candidate,
+                    str(exc),
+                    system_prompt=system_prompt,
+                    stage_name=stage_name,
+                )
+        raise AssertionError("unreachable")
+
+    async def _investigate_stage(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
         max_turns: int,
     ) -> str:
         text = ""
         async for event in query(
             client=self.client,
             registry=self.registry,
-            system_prompt=ORCHESTRATOR_PROMPT,
-            user_message=_build_request(context),
+            system_prompt=system_prompt,
+            user_message=user_message,
             cwd=self.cwd,
             code_index=self.code_index,
             max_turns=max_turns,
@@ -490,6 +734,19 @@ class Orchestrator:
             elif event.get("type") == "error":
                 raise event["error"]
         return text
+
+    async def _investigate(
+        self,
+        context: OrchestratorContext,
+        max_turns: int,
+    ) -> str:
+        """Compatibility entrypoint for callers testing the legacy one-shot prompt."""
+
+        return await self._investigate_stage(
+            system_prompt=ORCHESTRATOR_PROMPT,
+            user_message=_build_request(context),
+            max_turns=max_turns,
+        )
 
     async def _repair(self, bad_output: str, error: str) -> str:
         # feed the model its own output + the validation error; ask for corrected JSON.
@@ -501,6 +758,26 @@ class Orchestrator:
         )
         return await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
+        )
+
+    async def _repair_stage(
+        self,
+        bad_output: str,
+        error: str,
+        *,
+        system_prompt: str,
+        stage_name: str,
+    ) -> str:
+        msg = (
+            f"Your {stage_name} handoff was invalid:\n{error}\n\n"
+            f"Previous output:\n{bad_output}\n\n"
+            f"Output ONLY a corrected {stage_name} JSON object. Preserve valid "
+            "judgments and fix only the reported schema or handoff problem."
+        )
+        return await collect_text(
+            self.client,
+            [Message(role="user", content=msg)],
+            system_prompt=system_prompt,
         )
 
 
@@ -521,6 +798,277 @@ def _build_request(context: OrchestratorContext) -> str:
         "```\n\nFollow PHASES 1-5 in order. Use evidence references from the context and "
         "inspect the real source with read-only tools. Then output the final "
         "ImprovementProposal JSON."
+    )
+
+
+def _compact_evidence_index(context: OrchestratorContext) -> list[dict[str, Any]]:
+    """Keep lookup coordinates in-context; full event content stays behind a tool."""
+
+    keys = (
+        "event_id",
+        "run_id",
+        "type",
+        "tool",
+        "is_error",
+        "evidence_source",
+        "target_commit",
+    )
+    return [
+        {key: record.get(key) for key in keys if record.get(key) is not None}
+        for record in context.evidence_catalog
+    ]
+
+
+def _build_triage_request(context: OrchestratorContext) -> str:
+    payload = {
+        "improvement_intent": context.improvement_intent,
+        "target_run_semantics": context.target_run_semantics,
+        "current_target_commit": context.current_target_commit,
+        "current_run_ids": context.current_run_ids,
+        "non_current_run_ids": context.non_current_run_ids,
+        "current_run_alerts": [
+            item.model_dump(mode="json") for item in context.current_run_alerts
+        ],
+        "target_agent_runs": [
+            item.model_dump(mode="json") for item in context.target_agent_runs
+        ],
+        "previous_reforge_loops": [
+            item.model_dump(mode="json") for item in context.previous_reforge_loops
+        ],
+        "improvement_backlog": {
+            key: item.model_dump(mode="json")
+            for key, item in context.improvement_backlog.items()
+        },
+        "repository": context.repository.model_dump(mode="json"),
+        "run_manifest": context.run_manifest,
+        "evidence_index": _compact_evidence_index(context),
+    }
+    return (
+        "Produce the evidence/problem triage artifact from this deterministic view. "
+        "Retrieve full evidence only when a cited detail matters.\n```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n```"
+    )
+
+
+def _build_selection_request(
+    context: OrchestratorContext,
+    diagnosis: DiagnosisBoard,
+) -> str:
+    payload = {
+        "improvement_intent": context.improvement_intent,
+        "diagnosis_board": diagnosis.model_dump(mode="json"),
+        "previous_reforge_loops": [
+            item.model_dump(mode="json") for item in context.previous_reforge_loops
+        ],
+        "improvement_backlog": {
+            key: item.model_dump(mode="json")
+            for key, item in context.improvement_backlog.items()
+        },
+        "repository": context.repository.model_dump(mode="json"),
+        "run_manifest": context.run_manifest,
+    }
+    return (
+        "Generate interventions and make the one-Loop selection from this already "
+        "triaged decision view.\n```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n```"
+    )
+
+
+def _build_contract_request(
+    context: OrchestratorContext,
+    diagnosis: DiagnosisBoard,
+    selection: SelectionDecision,
+) -> str:
+    selected = selection.candidate_backlog.get(selection.selected_candidate_id)
+    refs = set(selected.diagnosis.evidence_refs if selected is not None else [])
+    payload = {
+        "selection_decision": selection.model_dump(mode="json"),
+        "selected_problem_cases": {
+            key: item.model_dump(mode="json")
+            for key, item in diagnosis.problem_cases.items()
+            if not refs or refs.intersection(item.evidence_refs)
+        },
+        "repository": context.repository.model_dump(mode="json"),
+        "run_manifest": context.run_manifest,
+        "relevant_evidence_index": [
+            item
+            for item in _compact_evidence_index(context)
+            if not refs or item.get("event_id") in refs
+        ],
+    }
+    return (
+        "Expand the frozen selection into one execution-level proposal. Inspect the "
+        "real source and call validate_plan before final output.\n```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + "\n```"
+    )
+
+
+def _validate_triage_coverage(
+    board: DiagnosisBoard,
+    context: OrchestratorContext,
+) -> list[str]:
+    expected = [item.run_id for item in context.current_run_alerts]
+    actual = [item.run_id for item in board.alert_dispositions]
+    problems = []
+    if len(actual) != len(set(actual)):
+        problems.append("each current_run_alert may appear only once")
+    missing = sorted(set(expected) - set(actual))
+    unknown = sorted(set(actual) - set(context.current_run_ids))
+    if missing:
+        problems.append("missing current_run_alert dispositions: " + ", ".join(missing))
+    if unknown:
+        problems.append("dispositions reference non-current or unknown runs: " + ", ".join(unknown))
+    mismatched = [
+        key for key, problem in board.problem_cases.items() if key != problem.id
+    ]
+    if mismatched:
+        problems.append("problem_cases keys must match ids: " + ", ".join(mismatched))
+    return problems
+
+
+def _validate_selection(
+    selection: SelectionDecision,
+    context: OrchestratorContext | None = None,
+) -> list[str]:
+    problems = []
+    mismatched = [
+        key
+        for key, candidate in selection.candidate_backlog.items()
+        if key != candidate.id
+    ]
+    if mismatched:
+        problems.append("candidate_backlog keys must match ids: " + ", ".join(mismatched))
+    ranked = [item.candidate_id for item in selection.preliminary_ranking]
+    if len(ranked) != len(set(ranked)):
+        problems.append("preliminary_ranking contains duplicate Candidates")
+    unknown_ranked = sorted(set(ranked) - set(selection.candidate_backlog))
+    if unknown_ranked:
+        problems.append("ranking references unknown Candidates: " + ", ".join(unknown_ranked))
+    if selection.decision == "abstain":
+        if selection.selected_candidate_id:
+            problems.append("abstain must have an empty selected_candidate_id")
+    elif selection.selected_candidate_id not in selection.candidate_backlog:
+        problems.append("proceed/needs_human must select one declared Candidate")
+    comparison = selection.top_two_comparison
+    if (
+        comparison is not None
+        and selection.decision != "abstain"
+        and comparison.winner != selection.selected_candidate_id
+    ):
+        problems.append("Top-2 winner must equal selected_candidate_id")
+    if context is not None:
+        known_files = set(context.repository.files)
+        for candidate_id, candidate in selection.candidate_backlog.items():
+            unknown_paths = _unknown_repo_paths(
+                candidate.scope.affected_components,
+                known_files,
+            )
+            if unknown_paths:
+                problems.append(
+                    f"Candidate {candidate_id} references task-workspace/non-repository "
+                    "paths instead of target-agent components: "
+                    + ", ".join(unknown_paths)
+                )
+    return problems
+
+
+def _unknown_repo_paths(items: list[str], known_files: set[str]) -> list[str]:
+    """Reject path-shaped task artifacts while allowing abstract component names."""
+
+    suffixes = (".py", ".ts", ".js", ".rs", ".go", ".java", ".toml", ".md")
+    return [
+        item
+        for item in items
+        if ("/" in item or item.endswith(suffixes))
+        and item not in known_files
+        and not any(path.startswith(item.rstrip("/") + "/") for path in known_files)
+    ]
+
+
+def _validate_contract_selection(
+    expansion: ContractExpansion,
+    selection: SelectionDecision,
+) -> list[str]:
+    contract = expansion.selected_change_contract
+    if contract.backlog_item_id != selection.selected_candidate_id:
+        return ["contract backlog_item_id must equal the frozen selection"]
+    return []
+
+
+def _proposal_from_contract(
+    selection: SelectionDecision,
+    expansion: ContractExpansion,
+) -> ImprovementProposal:
+    return ImprovementProposal(
+        summary=selection.summary,
+        problem_statement=selection.problem_statement,
+        proposal_guardrails=expansion.proposal_guardrails,
+        candidate_backlog=selection.candidate_backlog,
+        preliminary_ranking=selection.preliminary_ranking,
+        top_two_comparison=selection.top_two_comparison,
+        selected_candidate_id=selection.selected_candidate_id,
+        selected_change_contract=expansion.selected_change_contract,
+        evidence=expansion.evidence,
+        goals=expansion.goals,
+        non_goals=expansion.non_goals,
+        affected_components=expansion.affected_components,
+        dependencies=expansion.dependencies,
+        benefit=selection.benefit,
+        risk=selection.risk,
+        effort=selection.effort,
+        confidence=selection.confidence,
+        decision=selection.decision,
+        decision_reason=selection.decision_reason,
+        alternatives_considered=expansion.alternatives_considered,
+    )
+
+
+def _attach_frozen_decision(
+    proposal: ImprovementProposal,
+    diagnosis: DiagnosisBoard,
+    selection: SelectionDecision,
+) -> ImprovementProposal:
+    """Prevent later contract/acceptance repair from changing the chosen problem."""
+
+    return proposal.model_copy(
+        update={
+            "summary": selection.summary,
+            "problem_statement": selection.problem_statement,
+            "candidate_backlog": selection.candidate_backlog,
+            "preliminary_ranking": selection.preliminary_ranking,
+            "top_two_comparison": selection.top_two_comparison,
+            "selected_candidate_id": selection.selected_candidate_id,
+            "benefit": selection.benefit,
+            "risk": selection.risk,
+            "effort": selection.effort,
+            "confidence": selection.confidence,
+            "decision": selection.decision,
+            "decision_reason": selection.decision_reason,
+            "orchestrator_artifacts": OrchestratorArtifacts(
+                diagnosis=diagnosis,
+                selection=selection,
+            ),
+        }
+    )
+
+
+def _abstaining_proposal(selection: SelectionDecision) -> ImprovementProposal:
+    return ImprovementProposal(
+        summary=selection.summary,
+        problem_statement=selection.problem_statement,
+        candidate_backlog=selection.candidate_backlog,
+        preliminary_ranking=selection.preliminary_ranking,
+        top_two_comparison=selection.top_two_comparison,
+        selected_candidate_id="",
+        benefit=selection.benefit,
+        risk=selection.risk,
+        effort=selection.effort,
+        confidence=selection.confidence,
+        decision="abstain",
+        decision_reason=selection.decision_reason,
     )
 
 
