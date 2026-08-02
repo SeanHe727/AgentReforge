@@ -41,6 +41,15 @@ You receive two strictly separated histories:
    repetition and plan the next improvement. Never treat Reforge workflow events as
    target-agent behavior.
 
+For a coding agent, distinguish the TARGET AGENT REPOSITORY from a TASK WORKSPACE.
+The target repository contains the agent system being improved; each target-agent run
+may ask that same agent version to edit a different disposable repository. Different
+task files do not make the run irrelevant or turn it into another agent's history.
+`target_commit` identifies the agent version whose capability the run measures. A
+failure in an idempotency, algorithm, CLI, or other task workspace is current evidence
+about that target agent when its `target_commit` is current. Never describe generated
+task artifacts as delivered improvements to another repository.
+
 You also receive a deterministic repository map and READ-ONLY code tools. Produce an
 evidence-grounded ImprovementProposal only after completing this workflow:
 
@@ -115,6 +124,15 @@ PHASE 3 — GENERATE CANDIDATES
 - All scorecard numbers use 1=low and 5=high. Higher regression risk, effort, and
   evaluation cost are disadvantages; the other dimensions are advantages. Keep
   assessments concise enough to compare 1-3 grounded Candidates within the output budget.
+- Calibrate scores against observable anchors:
+  * failure severity 5 means terminal `failed_verification`, incomplete work, or an
+    unmet user outcome; 3 means recoverable degradation; 1 means a theoretical weakness;
+  * outcome observability 5 means an executable user outcome changes directly; 1 means
+    only prompt wording or process compliance is visible;
+  * discriminability 5 means baseline is expected to fail while Candidate is expected
+    to pass under the same Scenario; 1 means both likely pass;
+  * noise robustness 5 means deterministic or repeated evidence; 1 means a single
+    stochastic run could easily reverse the apparent result.
 - Do not default to a prompt tweak merely because it is cheap. Do not force a new
   module when the evidence supports a smaller fix.
 - Reject changes that only patch the observed example without a reusable mechanism.
@@ -154,6 +172,9 @@ PHASE 4 — SELECT ONE IMPROVEMENT
 - The pairwise winner becomes `selected_candidate_id`. It may differ from preliminary
   rank 1, but explain why. Do not select a Candidate merely because it is cheaper,
   historically familiar, or easier to demonstrate.
+- Claims of improved "reliability" or "consistency" require an observable outcome delta
+  or repeated evidence. A one-off Scenario that only shows the model followed new prompt
+  wording is weak mechanism evidence, not strong reliability evidence.
 - One Loop selects exactly ONE backlog Candidate and expands it into exactly ONE
   `selected_change_contract`. The Contract is one CHANGE UNIT: the smallest independently
   useful, causally coherent,

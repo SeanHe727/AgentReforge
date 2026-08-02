@@ -46,6 +46,11 @@ def test_orchestrator_uses_advisory_scorecards_and_top_two_review():
     assert "literal option `DEFER`" in ORCHESTRATOR_PROMPT
     assert "would the baseline likely pass" in ORCHESTRATOR_PROMPT
     assert "does not compute or override your ranking" in ORCHESTRATOR_PROMPT
+    assert "TARGET AGENT REPOSITORY from a TASK WORKSPACE" in ORCHESTRATOR_PROMPT
+    assert "`target_commit` identifies the agent version" in ORCHESTRATOR_PROMPT
+    assert "terminal `failed_verification`" in ORCHESTRATOR_PROMPT
+    assert "both likely pass" in ORCHESTRATOR_PROMPT
+    assert "stochastic run could easily reverse" in ORCHESTRATOR_PROMPT
 
 
 def test_proposal_schema_repair_can_recover_on_second_retry():
