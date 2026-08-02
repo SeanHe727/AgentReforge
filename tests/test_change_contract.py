@@ -8,11 +8,14 @@ from agentreforge.improve.models import (
     BacklogCandidate,
     CandidateDiagnosis,
     CandidateIntervention,
+    CandidatePairwiseComparison,
+    CandidatePriority,
+    CandidateRankingEntry,
     ContractClause,
     ImprovementProposal,
     SelectedChangeContract,
 )
-from agentreforge.improve.pipeline import _analysis_problems
+from agentreforge.improve.pipeline import PipelineResult, _analysis_problems, render_report
 
 
 def _new_interface_proposal() -> ImprovementProposal:
@@ -74,6 +77,43 @@ def _new_interface_proposal() -> ImprovementProposal:
                 title="Confined recursive repository discovery",
                 diagnosis=diagnosis,
                 intervention=intervention,
+                priority=CandidatePriority(
+                    problem={
+                        "evidence_strength": 5,
+                        "failure_severity": 4,
+                        "recurrence": 3,
+                        "cross_task_impact": 4,
+                        "evidence_freshness": 5,
+                        "user_relevance": 5,
+                        "assessment": "A current trajectory shows a terminal discovery failure.",
+                    },
+                    causal={
+                        "root_cause_confidence": 5,
+                        "intervention_fit": 5,
+                        "competing_hypotheses": ["planning guidance"],
+                        "falsification_condition": "Existing tools already find nested source.",
+                    },
+                    impact={
+                        "expected_outcome_impact": 4,
+                        "generality": 4,
+                        "one_loop_feasibility": 5,
+                        "regression_risk": 2,
+                        "effort": 2,
+                        "expected_delta": "Nested source is found before editing.",
+                    },
+                    evaluability={
+                        "mechanism_observability": 5,
+                        "outcome_observability": 5,
+                        "discriminability": 5,
+                        "attribution_confidence": 4,
+                        "noise_robustness": 4,
+                        "evaluation_cost": 2,
+                        "baseline_prediction": "The nested file is not found.",
+                        "candidate_prediction": "The nested file is found and edited.",
+                        "observable_difference": "A task artifact appears in the nested file.",
+                        "confounders": ["The model may guess the path."],
+                    },
+                ),
             ),
             "unselected-planning": BacklogCandidate(
                 id="unselected-planning",
@@ -88,6 +128,32 @@ def _new_interface_proposal() -> ImprovementProposal:
                 ),
             ),
         },
+        preliminary_ranking=[
+            CandidateRankingEntry(
+                candidate_id="repo-discovery",
+                rank=1,
+                rationale="Direct current failure with a discriminative scenario.",
+            ),
+            CandidateRankingEntry(
+                candidate_id="unselected-planning",
+                rank=2,
+                rationale="Broader but less directly evidenced.",
+            ),
+        ],
+        top_two_comparison=CandidatePairwiseComparison(
+            candidate_a="repo-discovery",
+            candidate_b="unselected-planning",
+            strongest_case_for_a="Directly addresses the observed failure.",
+            strongest_case_for_b="Could improve general task discipline.",
+            comparative_judgments={
+                "evidence": "repo-discovery has current terminal evidence",
+                "observability": "repo-discovery has a stronger baseline/candidate contrast",
+            },
+            baseline_counterfactual="The baseline cannot locate the nested file.",
+            candidate_counterfactual="The candidate should locate and modify it.",
+            winner="repo-discovery",
+            decision_reason="The direct and observable cause outweighs broader speculation.",
+        ),
         selected_candidate_id="repo-discovery",
         selected_change_contract=contract,
         goals=["Improve repository discovery"],
@@ -129,3 +195,23 @@ def test_deliverer_receives_proposal_guardrails_and_only_selected_contract():
     assert "add and wire a workspace-confined recursive search tool" in message
     assert "unselected-planning" not in message
     assert "diff --git a/demo_agent/tools.py" in message
+
+
+def test_scorecards_and_pairwise_review_are_recorded_for_human_inspection():
+    proposal = _new_interface_proposal()
+
+    assert proposal.candidate_backlog[
+        "repo-discovery"
+    ].priority.problem.evidence_strength == 5
+    assert [item.candidate_id for item in proposal.preliminary_ranking] == [
+        "repo-discovery",
+        "unselected-planning",
+    ]
+    assert proposal.top_two_comparison is not None
+    assert proposal.top_two_comparison.winner == proposal.selected_candidate_id
+
+    report = render_report(PipelineResult(stage="approved", proposal=proposal))
+
+    assert "## Orchestrator decision review" in report
+    assert "Direct current failure with a discriminative scenario" in report
+    assert "**Winner:** `repo-discovery`" in report

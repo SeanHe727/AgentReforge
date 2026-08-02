@@ -211,7 +211,61 @@ class CandidateIntervention(BaseModel):
     expected_capability_delta: str
 
 
+class ProblemScorecard(BaseModel):
+    """LLM-authored assessment of the problem before solution cost is considered."""
+
+    evidence_strength: int = Field(default=1, ge=1, le=5)
+    failure_severity: int = Field(default=1, ge=1, le=5)
+    recurrence: int = Field(default=1, ge=1, le=5)
+    cross_task_impact: int = Field(default=1, ge=1, le=5)
+    evidence_freshness: int = Field(default=1, ge=1, le=5)
+    user_relevance: int = Field(default=1, ge=1, le=5)
+    assessment: str = ""
+
+
+class CausalScorecard(BaseModel):
+    """How directly the diagnosis and intervention explain the observed problem."""
+
+    root_cause_confidence: int = Field(default=1, ge=1, le=5)
+    intervention_fit: int = Field(default=1, ge=1, le=5)
+    competing_hypotheses: list[str] = Field(default_factory=list)
+    falsification_condition: str = ""
+
+
+class ImpactScorecard(BaseModel):
+    """Expected value and practical cost of the proposed intervention."""
+
+    expected_outcome_impact: int = Field(default=1, ge=1, le=5)
+    generality: int = Field(default=1, ge=1, le=5)
+    one_loop_feasibility: int = Field(default=1, ge=1, le=5)
+    regression_risk: int = Field(default=1, ge=1, le=5)
+    effort: int = Field(default=1, ge=1, le=5)
+    expected_delta: str = ""
+
+
+class EvaluabilityScorecard(BaseModel):
+    """Whether a real outcome delta can be distinguished from model noise."""
+
+    mechanism_observability: int = Field(default=1, ge=1, le=5)
+    outcome_observability: int = Field(default=1, ge=1, le=5)
+    discriminability: int = Field(default=1, ge=1, le=5)
+    attribution_confidence: int = Field(default=1, ge=1, le=5)
+    noise_robustness: int = Field(default=1, ge=1, le=5)
+    evaluation_cost: int = Field(default=1, ge=1, le=5)
+    baseline_prediction: str = ""
+    candidate_prediction: str = ""
+    observable_difference: str = ""
+    confounders: list[str] = Field(default_factory=list)
+
+
 class CandidatePriority(BaseModel):
+    # These scorecards structure LLM deliberation. They are not combined into a
+    # deterministic score and do not participate in a policy gate.
+    problem: ProblemScorecard = Field(default_factory=ProblemScorecard)
+    causal: CausalScorecard = Field(default_factory=CausalScorecard)
+    impact: ImpactScorecard = Field(default_factory=ImpactScorecard)
+    evaluability: EvaluabilityScorecard = Field(default_factory=EvaluabilityScorecard)
+    # Backward-compatible advisory summary retained for historical records.
     benefit: int = Field(default=1, ge=1, le=5)
     risk: int = Field(default=1, ge=1, le=5)
     effort: int = Field(default=1, ge=1, le=5)
@@ -248,6 +302,30 @@ class BacklogCandidate(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     conflicts_with: list[str] = Field(default_factory=list)
     history: CandidateHistory = Field(default_factory=CandidateHistory)
+
+
+class CandidateRankingEntry(BaseModel):
+    """One LLM-authored position in the preliminary Candidate ranking."""
+
+    candidate_id: str
+    rank: int = Field(ge=1)
+    rationale: str
+
+
+class CandidatePairwiseComparison(BaseModel):
+    """A qualitative Top-2 review; ``DEFER`` may be the second option."""
+
+    candidate_a: str
+    candidate_b: str
+    strongest_case_for_a: str
+    strongest_case_for_b: str
+    # Flexible named judgments such as evidence, causal fit, outcome delta,
+    # observability, and risk/effort. Values explain which side has the advantage.
+    comparative_judgments: dict[str, str] = Field(default_factory=dict)
+    baseline_counterfactual: str = ""
+    candidate_counterfactual: str = ""
+    winner: str
+    decision_reason: str
 
 
 class SelectedChangeContract(BaseModel):
@@ -353,6 +431,10 @@ class ImprovementProposal(BaseModel):
     # New decision interface. Backlog items are decision-level hypotheses; only the
     # selected item is expanded into an execution-level contract.
     candidate_backlog: dict[str, BacklogCandidate] = Field(default_factory=dict)
+    # LLM-authored decision artifacts. The framework records their structure but
+    # does not calculate a score or override the model's qualitative judgment.
+    preliminary_ranking: list[CandidateRankingEntry] = Field(default_factory=list)
+    top_two_comparison: CandidatePairwiseComparison | None = None
     selected_candidate_id: str = ""
     selected_change_contract: SelectedChangeContract | None = None
     # Legacy analysis/task fields remain readable while stored runs migrate.

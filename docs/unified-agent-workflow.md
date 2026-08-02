@@ -130,15 +130,27 @@ current-commit evidence; stale baseline behavior is not sufficient justification
 The Orchestrator follows a fixed reasoning workflow:
 
 ```text
-Orient -> Diagnose symptom/root cause/capability gap
+Orient -> Triage problems independently of solution cost
+       -> Diagnose competing root-cause hypotheses
        -> Generate interventions at multiple leverage levels
-       -> Rank Candidates by evidence/benefit/risk/effort
+       -> Fill problem/causal/impact/evaluability scorecards
+       -> Produce a qualitative preliminary Candidate ranking
+       -> Compare Top-2 directly (or one Candidate against DEFER)
        -> Exclude completed achievements and Delivery-only reward hacks
        -> Select one unsolved Candidate
        -> Plan one bounded Task
        -> Freeze runnable Delivery scenarios before implementation
        -> Validate the Task and acceptance contracts
 ```
+
+The scorecards are structured LLM deliberation, not a deterministic weighted
+score or policy gate. Problem severity and evidence are assessed before
+intervention cost so a cheap speculative change does not outrank a current
+terminal failure merely because it is easy to implement. Evaluability distinguishes
+mechanism compliance from a real outcome delta: the Orchestrator predicts baseline
+and candidate behavior, identifies the observable difference and confounders, and
+uses those facts in a qualitative Top-2 review. A highly observable but trivial
+change must not win solely because it is easy to demonstrate.
 
 A possible top-level interface is:
 

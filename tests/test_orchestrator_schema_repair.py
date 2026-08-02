@@ -37,6 +37,17 @@ def test_orchestrator_has_single_task_achievement_and_anti_reward_hacking_rules(
     assert "The recursion limit is a ceiling, never a target" in ORCHESTRATOR_PROMPT
 
 
+def test_orchestrator_uses_advisory_scorecards_and_top_two_review():
+    assert "PROBLEM TRIAGE before considering solution cost" in ORCHESTRATOR_PROMPT
+    assert "failed_verification" in ORCHESTRATOR_PROMPT
+    assert "NEVER add them into a mechanical total" in ORCHESTRATOR_PROMPT
+    assert "`preliminary_ranking` for every viable Candidate" in ORCHESTRATOR_PROMPT
+    assert "`top_two_comparison`" in ORCHESTRATOR_PROMPT
+    assert "literal option `DEFER`" in ORCHESTRATOR_PROMPT
+    assert "would the baseline likely pass" in ORCHESTRATOR_PROMPT
+    assert "does not compute or override your ranking" in ORCHESTRATOR_PROMPT
+
+
 def test_proposal_schema_repair_can_recover_on_second_retry():
     orchestrator = Orchestrator(_UnusedClient(), ToolRegistry(), ".")
     valid = make_proposal().model_dump_json()

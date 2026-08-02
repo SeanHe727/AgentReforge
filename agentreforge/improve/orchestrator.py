@@ -78,10 +78,16 @@ PHASE 1 — ORIENT
   not a new attempt.
 
 PHASE 2 — DIAGNOSE
-- Identify 1-5 capability gaps. Start from the prior dynamic backlog, then update it
-  from the whole current architecture and latest evidence rather than examining only
-  the most recently delivered Scenario. For each, distinguish observed symptom, likely root
-  cause, missing capability, evidence references, and uncertainty.
+- Perform PROBLEM TRIAGE before considering solution cost. Identify 1-3 capability gaps
+  from the prior dynamic backlog, whole current architecture, and latest evidence rather
+  than examining only the most recently delivered Scenario. For each, distinguish observed
+  symptom, likely root cause, missing capability, evidence references, and uncertainty.
+- Assess the problem itself separately from its proposed solution: evidence strength,
+  failure severity, recurrence, cross-task impact, evidence freshness, and user relevance.
+  A cheap intervention must not make a weak problem outrank a current terminal failure.
+- Account for every current `failed_verification`, incomplete, step-budget, or error outcome.
+  It need not be selected, but its direct cause must become a Candidate hypothesis or receive
+  an explicit evidence-based disposition explaining why it is non-actionable or lower value.
 - A missing action in one trajectory is not automatically a missing system feature.
   Check the source to learn whether the failure is instruction, workflow, tool, state,
   or architecture related.
@@ -92,6 +98,23 @@ PHASE 2 — DIAGNOSE
 PHASE 3 — GENERATE CANDIDATES
 - Compare viable interventions at different leverage levels: prompt/instruction,
   workflow/control flow, and tool/module/architecture where supported by evidence.
+- For each Candidate fill four qualitative scorecards before ranking:
+  * `problem`: evidence strength, failure severity, recurrence, cross-task impact,
+    evidence freshness, and user relevance;
+  * `causal`: root-cause confidence, intervention fit, competing hypotheses, and a
+    falsification condition;
+  * `impact`: expected outcome impact, generality, one-Loop feasibility, regression
+    risk, effort, and the predicted capability delta;
+  * `evaluability`: mechanism and outcome observability, baseline/candidate
+    discriminability, attribution confidence, noise robustness, evaluation cost,
+    baseline prediction, candidate prediction, observable difference, and confounders.
+- Scores structure your judgment; NEVER add them into a mechanical total. Use anchored
+  reasoning and evidence references. High observability alone must not make a trivial
+  low-impact task win. For a high-impact but weakly observable problem, prefer an
+  independently useful observable vertical slice or defer it with the measurement gap.
+- All scorecard numbers use 1=low and 5=high. Higher regression risk, effort, and
+  evaluation cost are disadvantages; the other dimensions are advantages. Keep
+  assessments concise enough to compare 1-3 grounded Candidates within the output budget.
 - Do not default to a prompt tweak merely because it is cheap. Do not force a new
   module when the evidence supports a smaller fix.
 - Reject changes that only patch the observed example without a reusable mechanism.
@@ -116,8 +139,21 @@ PHASE 3 — GENERATE CANDIDATES
   names. Preserve a prior id when the hypothesis is materially the same.
 
 PHASE 4 — SELECT ONE IMPROVEMENT
-- Rank candidates by evidence strength, cross-task capability benefit, causal clarity,
-  risk, effort, and testability.
+- Produce `preliminary_ranking` for every viable Candidate. Rank qualitatively in this
+  order of attention: problem evidence/severity, causal fit, expected cross-task outcome
+  delta, evaluability/discriminability, one-Loop feasibility, then risk/effort. This is
+  an LLM judgment, not a weighted formula.
+- Take preliminary ranks 1 and 2 and produce `top_two_comparison`. Give the strongest
+  case for each, compare direct evidence, causal fit, expected outcome delta,
+  observability/discriminability, risk/effort, and opportunity cost, then state a winner.
+  Include a counterfactual: would the baseline likely pass the proposed Scenario already,
+  and could a Scenario pass while the claimed agent improvement remains unrealized?
+- When only one viable Candidate exists, compare it against the literal option `DEFER`.
+  If `DEFER` wins, continue auditing other problems; abstain only when no remaining
+  evidence-backed Candidate is worth a Loop.
+- The pairwise winner becomes `selected_candidate_id`. It may differ from preliminary
+  rank 1, but explain why. Do not select a Candidate merely because it is cheaper,
+  historically familiar, or easier to demonstrate.
 - One Loop selects exactly ONE backlog Candidate and expands it into exactly ONE
   `selected_change_contract`. The Contract is one CHANGE UNIT: the smallest independently
   useful, causally coherent,
@@ -138,6 +174,8 @@ PHASE 4 — SELECT ONE IMPROVEMENT
 
 PHASE 5 — CONTRACT
 - Set `selected_candidate_id` to one exact key from `candidate_backlog`.
+- Ensure the selected id is the qualitative pairwise winner. The framework records this
+  decision artifact but does not compute or override your ranking.
 - Expand only that Candidate into `selected_change_contract`. Snapshot its diagnosis and
   intervention, then define objective, inputs/expected outputs, required behavior,
   implementation constraints, invariants, prohibited shortcuts, suggested write scope,
@@ -155,8 +193,9 @@ Rules:
 - Evidence and Candidate comparison improve the plan, but they are reasoning aids rather
   than schema gates. Use as much structure as the change genuinely needs.
 - You must NOT write or modify any code.
-- Score benefit/risk/effort 1-5 and confidence 0.0-1.0 as advisory metadata. Propose
-  proceed, abstain, or needs_human explicitly.
+- Score the structured Candidate scorecards, then summarize benefit/risk/effort 1-5 and
+  confidence 0.0-1.0 as advisory metadata. No score is a hard gate or weighted total.
+  Propose proceed, abstain, or needs_human explicitly.
 - The recursion limit is a ceiling, never a target. Choose `abstain` when there is no
   new evidence-backed unsolved capability, when only completed achievements remain,
   when the only available work would optimize a Delivery/evaluation artifact, or when
@@ -176,10 +215,15 @@ Rules:
 - Contract acceptance criteria are review/test hints. Only explicit safety-property
   checks, `delivery_run`, and frozen `delivery_scenarios` participate in Delivery.
 - For a target agent with a runnable CLI, prefer one or two `delivery_scenarios` that
-   exercise the selected capability end to end. Each scenario contains a frozen prompt,
+  exercise the selected capability end to end. Each scenario contains a frozen prompt,
   a safe argv command, a small isolated fixture, and
   observable expected/forbidden behaviors. Design scenarios before Writer runs; do not
   adapt acceptance difficulty after seeing the implementation.
+- Derive each Scenario from the selected Candidate's evaluability scorecard. A Scenario
+  must name an observable difference that the intervention is expected to cause. If the
+  baseline likely passes it unchanged, treat it as contract-compliance evidence only and
+  do not claim it demonstrates improvement; strengthen the Scenario or lower the
+  Candidate's discriminability and rank.
 - Scenario commands are argv arrays, never shell strings. Inspect the real target
   entrypoint and match its actual CLI. Use `{prompt}` only when that CLI accepts a
   natural-language task argument; use `{workspace}` only when it accepts a workspace
@@ -234,7 +278,20 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
     diagnosis: {symptom, root_cause, capability_gap, evidence_refs: [str], uncertainty},
     intervention: {level: prompt|workflow|tool|module|architecture, mechanism,
       expected_capability_delta},
-    priority: {benefit: 1-5, risk: 1-5, effort: 1-5, confidence: 0-1, rank_reason},
+    priority: {
+      problem: {evidence_strength: 1-5, failure_severity: 1-5, recurrence: 1-5,
+        cross_task_impact: 1-5, evidence_freshness: 1-5, user_relevance: 1-5,
+        assessment},
+      causal: {root_cause_confidence: 1-5, intervention_fit: 1-5,
+        competing_hypotheses: [str], falsification_condition},
+      impact: {expected_outcome_impact: 1-5, generality: 1-5,
+        one_loop_feasibility: 1-5, regression_risk: 1-5, effort: 1-5,
+        expected_delta},
+      evaluability: {mechanism_observability: 1-5, outcome_observability: 1-5,
+        discriminability: 1-5, attribution_confidence: 1-5, noise_robustness: 1-5,
+        evaluation_cost: 1-5, baseline_prediction, candidate_prediction,
+        observable_difference, confounders: [str]},
+      benefit: 1-5, risk: 1-5, effort: 1-5, confidence: 0-1, rank_reason},
     scope: {affected_components: [str], non_goals: [str]},
     dependencies: [candidate_id], conflicts_with: [candidate_id],
     history: {first_seen_loop: int, last_reviewed_loop: int,
@@ -242,6 +299,15 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
       verification_level: none|implemented|behavior_verified|delta_demonstrated,
       disposition_reason}
   }}
+- preliminary_ranking: [{candidate_id: candidate_backlog key, rank: int starting at 1,
+    rationale: str}], covering every viable Candidate.
+- top_two_comparison: null only for abstain with no viable Candidate, otherwise {
+    candidate_a: preliminary rank 1,
+    candidate_b: preliminary rank 2 or literal `DEFER` when only one Candidate exists,
+    strongest_case_for_a, strongest_case_for_b,
+    comparative_judgments: {dimension_name: qualitative comparison},
+    baseline_counterfactual, candidate_counterfactual,
+    winner: candidate_a|candidate_b, decision_reason}.
 - selected_candidate_id: exactly one candidate_backlog key for proceed/needs_human,
   empty for abstain.
 - selected_change_contract: null for abstain, otherwise {

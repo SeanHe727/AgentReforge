@@ -993,6 +993,15 @@ def _materialize_loop_record(
                     key: item.model_dump(mode="json")
                     for key, item in proposal.candidate_backlog.items()
                 },
+                "preliminary_ranking": [
+                    item.model_dump(mode="json")
+                    for item in proposal.preliminary_ranking
+                ],
+                "top_two_comparison": (
+                    proposal.top_two_comparison.model_dump(mode="json")
+                    if proposal.top_two_comparison is not None
+                    else None
+                ),
                 "selected_candidate_id": proposal.selected_candidate_id,
             }
             if proposal.candidate_backlog
@@ -1437,6 +1446,34 @@ def render_report(result: PipelineResult) -> str:
         lines.append(f"- **Repair rounds:** {result.repairs}")
     if result.merged_commit:
         lines.append(f"- **Merged:** {result.merged_commit[:12]}")
+
+    if p and p.preliminary_ranking:
+        lines += ["", "## Orchestrator decision review", "", "### Preliminary ranking"]
+        candidate_titles = {
+            candidate_id: candidate.title
+            for candidate_id, candidate in p.candidate_backlog.items()
+        }
+        for item in sorted(p.preliminary_ranking, key=lambda value: value.rank):
+            title = candidate_titles.get(item.candidate_id, item.candidate_id)
+            lines.append(
+                f"{item.rank}. **{title}** (`{item.candidate_id}`) — {item.rationale}"
+            )
+        comparison = p.top_two_comparison
+        if comparison is not None:
+            lines += [
+                "",
+                "### Top-2 comparison",
+                f"- **A:** `{comparison.candidate_a}` — "
+                f"{comparison.strongest_case_for_a}",
+                f"- **B:** `{comparison.candidate_b}` — "
+                f"{comparison.strongest_case_for_b}",
+            ]
+            for dimension, judgment in comparison.comparative_judgments.items():
+                lines.append(f"- **{dimension}:** {judgment}")
+            lines += [
+                f"- **Winner:** `{comparison.winner}`",
+                f"- **Decision:** {comparison.decision_reason}",
+            ]
 
     if result.outcome:
         lines += ["", "## Implementation"]
