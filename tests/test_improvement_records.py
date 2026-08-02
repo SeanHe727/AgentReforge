@@ -272,6 +272,38 @@ def test_nonzero_string_exit_is_normalized_for_new_and_legacy_trajectory():
     assert evidence[0]["is_error"] is True
 
 
+def test_external_evaluation_failure_is_separate_target_evidence():
+    summaries, evidence = summarize_target_trajectory(
+        [
+            {
+                "run_id": "baseline-complex",
+                "event_id": "baseline-complex:event:0",
+                "type": "target_run_started",
+                "task_prompt": "repair the integration",
+            },
+            {
+                "run_id": "baseline-complex",
+                "event_id": "baseline-complex:event:1",
+                "type": "done",
+                "outcome": "completed",
+                "final_response": "implemented",
+            },
+            {
+                "run_id": "baseline-complex",
+                "event_id": "baseline-complex:event:2",
+                "type": "evaluation_result",
+                "passed": False,
+                "content": "real CLI invocation failed",
+            },
+        ]
+    )
+
+    assert summaries[0].outcome == "failed_verification"
+    assert summaries[0].error_messages == ["real CLI invocation failed"]
+    assert evidence[-1]["type"] == "evaluation_result"
+    assert evidence[-1]["is_error"] is True
+
+
 def test_target_summary_marks_only_current_commit_evidence_current():
     summaries, _ = summarize_target_trajectory(
         [

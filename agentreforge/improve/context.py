@@ -205,11 +205,23 @@ def summarize_target_trajectory(
             elif event_type == "error":
                 errors.append(str(event.get("error") or "unknown error"))
                 outcome = "error"
+            elif event_type == "evaluation_result":
+                if not bool(event.get("passed")):
+                    errors.append(
+                        str(event.get("content") or "external verification failed")
+                    )
+                    outcome = "failed_verification"
             elif event_type == "done":
                 final_response = str(event.get("final_response") or final_response)
                 outcome = str(event.get("outcome") or "completed")
 
-            if event_type in {"target_run_started", "tool_result", "error", "done"}:
+            if event_type in {
+                "target_run_started",
+                "tool_result",
+                "evaluation_result",
+                "error",
+                "done",
+            }:
                 refs.append(event_id)
                 evidence_catalog.append(
                     {
@@ -222,6 +234,8 @@ def summarize_target_trajectory(
                         "is_error": (
                             normalized_error
                             if event_type == "tool_result"
+                            else not bool(event.get("passed"))
+                            if event_type == "evaluation_result"
                             else event.get("is_error")
                         ),
                         "evidence_source": event.get("evidence_source"),

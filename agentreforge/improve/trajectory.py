@@ -250,7 +250,7 @@ def list_trajectories(cwd: str, store_root: str | Path | None = None) -> list[st
 
 
 def load_recent_trajectory(
-    cwd: str, *, sessions: int = 3, max_records: int = 200, store_root: str | Path | None = None
+    cwd: str, *, sessions: int = 4, max_records: int = 200, store_root: str | Path | None = None
 ) -> list[dict[str, Any]]:
     """Aggregate the evidence events from the most recent `sessions` runs.
 
