@@ -29,18 +29,25 @@ from ..types import Message
 from .context import OrchestratorContext, OrchestratorContextBuilder
 from .history_index import ImprovementHistoryIndex
 from .models import (
+    CaseAnalysis,
+    CaseAnalysisBoard,
     ContractExpansion,
+    DeliveryCaseDefinition,
+    DeliveryExecutionDesign,
+    DeliveryScenario,
     DiagnosisBoard,
     ImprovementProposal,
     OrchestratorArtifacts,
+    ScenarioObservation,
     SelectionDecision,
+    WorkflowDiagnosisBoard,
 )
 from .plan_validator import validate_plan_tool
 from .records import ReforgeLoopRecord
 
 ORCHESTRATOR_PROMPT = """You are the improvement Orchestrator: an analyst, not an implementer.
 
-You receive two strictly separated histories:
+You receive typed context artifacts:
 1. `target_agent_runs`: what the TARGET AGENT was asked to do and how it behaved.
    Use these runs to diagnose what capability should improve. Every run is tagged
    with `target_commit`, `evidence_source`, and `is_current`. Read its structured
@@ -52,10 +59,7 @@ You receive two strictly separated histories:
    `current_target_commit`, `current_run_ids`, and `non_current_run_ids` are
    deterministic Git-identity facts. Never relabel a listed current run as another
    agent version, and never call a listed non-current run current evidence.
-2. `previous_reforge_loops`: what AgentReforge itself planned, wrote, reviewed,
-   delivered, and committed earlier in THIS recursive run. Use these to avoid
-   repetition and plan the next improvement. Never treat Reforge workflow events as
-   target-agent behavior.
+2. `previous_reforge_loops`: prior recursive-run records used for history and progress.
 
 For a coding agent, distinguish the TARGET AGENT REPOSITORY from a TASK WORKSPACE.
 The target repository contains the agent system being improved; each target-agent run
@@ -65,6 +69,13 @@ task files do not make the run irrelevant or turn it into another agent's histor
 failure in an idempotency, algorithm, CLI, or other task workspace is current evidence
 about that target agent when its `target_commit` is current. Never describe generated
 task artifacts as delivered improvements to another repository.
+Crucially, a test failure, traceback, command, flag, schema, or interface mentioned
+inside a target-agent run describes the GENERATED TASK ARTIFACT by default, not the
+target agent's own implementation. First label the artifact origin internally:
+`agent_repository`, `task_workspace`, or `execution_environment`. A missing CLI flag
+in code the target agent generated is evidence that the agent failed to understand,
+implement, or verify a requirement; it is NOT evidence that the agent repository
+should add that flag to its own CLI.
 
 You also receive a deterministic repository map and READ-ONLY code tools. Produce an
 evidence-grounded ImprovementProposal only after completing this workflow:
@@ -118,6 +129,10 @@ PHASE 2 — DIAGNOSE
 - A missing action in one trajectory is not automatically a missing system feature.
   Check the source to learn whether the failure is instruction, workflow, tool, state,
   or architecture related.
+- Translate task-workspace symptoms into agent-level causes before creating a problem
+  case. For example, "generated service omitted a required option" may support a
+  requirement-assimilation or end-to-end-verification gap. It never directly supports
+  adding that option to the target agent's own entrypoint.
 - Current-run facts are authoritative and already supplied directly. Use
   `search_improvement_history` only after an initial diagnosis, to find analogous
   OLD runs; retrieval results are supporting experience, not proof of current behavior.
@@ -164,11 +179,6 @@ PHASE 3 — GENERATE CANDIDATES
   the same delivered capability when their mechanism and expected delta are equivalent.
   Reopen a delivered capability only with CURRENT-commit evidence that it remains
   ineffective; stale baseline evidence is insufficient.
-- A Delivery command, smoke marker, expected string, report, or documentation change is
-  verification infrastructure—not a target-agent capability. Never select work whose
-  purpose is merely to make AgentReforge's gate or evaluator pass. It is eligible only
-  when independent evidence shows the target agent itself has the corresponding runtime
-  or usability defect.
 - Represent the current todo set as `candidate_backlog`, a dictionary keyed by a stable
   Candidate id. Every item must carry its diagnosis, intervention, priority, scope,
   dependencies/conflicts, and history/disposition. Do not make the todo list a list of
@@ -252,17 +262,26 @@ Rules:
   implementation suggestions for Writer/Reviewer, not hard authorization boundaries.
   Keep them useful and concise; do not over-specify a small change.
 - Contract acceptance criteria are review/test hints. Only explicit safety-property
-  checks, `delivery_run`, and frozen `delivery_scenarios` participate in Delivery.
-- For a target agent with a runnable CLI, prefer one or two `delivery_scenarios` that
-  exercise the selected capability end to end. Each scenario contains a frozen prompt,
-  a safe argv command, a small isolated fixture, and
-  observable expected/forbidden behaviors. Design scenarios before Writer runs; do not
-  adapt acceptance difficulty after seeing the implementation.
+  checks, `delivery_run`, and the frozen `delivery_scenario` participate in Delivery.
+- One Loop implements one Candidate through one Task and at most ONE primary
+  `delivery_scenario`. Multiple inputs, commands, and behavioral checks belong inside
+  that one Scenario; they are not separate Scenarios. For a target agent with a
+  runnable CLI, design that Scenario to exercise the selected capability end to end.
+  It contains a structured `task_contract`, a safe argv command, a small isolated
+  fixture, structured component observations, and observable expected/forbidden
+  behaviors. Design scenarios before Writer runs; do not adapt acceptance difficulty
+  after seeing the implementation.
 - Derive each Scenario from the selected Candidate's evaluability scorecard. A Scenario
   must name an observable difference that the intervention is expected to cause. If the
   baseline likely passes it unchanged, treat it as contract-compliance evidence only and
   do not claim it demonstrates improvement; strengthen the Scenario or lower the
   Candidate's discriminability and rank.
+- The primary Scenario must exercise the Candidate's positive capability path. Do not
+  manufacture an empty, impossible, or missing-dependency workspace and then treat the
+  target agent's refusal/blocker report as proof of improved task execution or
+  verification. A negative case may prove an error-handling guardrail, but cannot by
+  itself demonstrate a Candidate whose expected delta is successful implementation,
+  verification, or completion.
 - Scenario commands are argv arrays, never shell strings. Inspect the real target
   entrypoint and match its actual CLI. Use `{prompt}` only when that CLI accepts a
   natural-language task argument; use `{workspace}` only when it accepts a workspace
@@ -271,7 +290,9 @@ Rules:
   bounded and directly causal: they decide Delivery for this Candidate, not general
   benchmark quality. Optional later diagnostic probes may explain failure but cannot
   change the frozen pass/fail scenarios.
-- Set `requires_trajectory=true` whenever a scenario must prove internal tool use,
+- Define `observations` as a small fill-in table: component, expected behavior, and
+  admissible evidence sources. Set `requires_trajectory=true` whenever a scenario must
+  prove internal tool use,
   inspect-before-edit, verify-after-edit, call ordering, or any other process fact.
   A target's own final response is not evidence that it performed those actions. If
   the target cannot emit trajectory evidence, design artifact/output-observable
@@ -354,7 +375,10 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
     objective, rationale,
     diagnosis: the selected Candidate diagnosis snapshot,
     intervention: the selected Candidate intervention snapshot,
-    inputs: [{id, description}], expected_outputs: [{id, description}],
+    inputs: [{id, description}],
+    expected_outputs: [{
+      id, description, rationale, evidence_direction
+    }],
     required_behaviors: [{id, description}],
     implementation_constraints: [{id, description}],
     invariants: [{id, description}],
@@ -377,11 +401,30 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
 - benefit/risk/effort: int 1-5; confidence: float 0-1
 - decision: proceed|abstain|needs_human
 - selected_change_contract.delivery_run[]: system-level integration/smoke commands.
-- selected_change_contract.delivery_scenarios[]: {id: str, prompt: str,
+- selected_change_contract.delivery_scenarios[]: zero or one {id: str,
+  task_contract: {
+    objective: str, context: [str],
+    requirements: [{id: str, description: str}],
+    constraints: [{id: str, description: str}],
+    outcome_contract: {
+      primary_success: [{id: str, description: str, rationale: str,
+        evidence_direction: str}],
+      guardrails: [{id: str, description: str, rationale: str,
+        evidence_direction: str}],
+      inconclusive: [{id: str, description: str, rationale: str,
+        evidence_direction: str}]
+    },
+    acceptance_checks: [{id: str, description: str}]
+  },
   command: [argv strings, optionally containing {prompt} and/or {workspace} only
     when required by the target entrypoint],
   fixture_files: {repo_relative_path: content},
+  environment_requirements: [str], baseline_prediction: str,
+  candidate_prediction: str, observable_difference: str,
   expected_behaviors: [str], forbidden_behaviors: [str],
+  observations: [{id: str, component: str, expected_behavior: str,
+    evidence_sources: [agent_input|agent_output|tool_call|tool_result|artifact|final_output|log]}],
+  budgets: {max_agent_turns: int, max_action_steps: int},
   executable_conditions: [{name: str, state: available|unavailable}],
   requires_trajectory: bool}.
 - selected_change_contract.delivery_checklist[]: high-level system requirements.
@@ -396,14 +439,118 @@ When done, output ONLY the proposal as ONE JSON object in a ```json code block. 
   dependencies[], decision_reason, alternatives_considered[]"""
 
 
-TRIAGE_PROMPT = """You are the Evidence Triage stage inside one improvement Orchestrator.
+WORKFLOW_TRIAGE_PROMPT = """You are the Workflow Analysis stage inside AgentReforge's
+Orchestrator. Analyze only AgentReforge's own prior Loop execution records: planning,
+schema handoffs, Writer/Reviewer coordination, Delivery, rollback, and commit state.
+You do not receive target-agent trajectories or target source, and you do not generate
+target-agent improvement Candidates.
+
+For every supplied Loop, classify what the record establishes. A Loop may contain a
+valid target hypothesis while also failing because AgentReforge's interface or
+execution malfunctioned. List Candidate ids that are workflow-only artifacts in
+`target_candidate_exclusions`; do not exclude a valid target hypothesis merely because
+its implementation attempt failed.
+
+Output ONLY one WorkflowDiagnosisBoard JSON object:
+{
+  "loop_assessments": [{
+    "loop_id": str,
+    "stage": str,
+    "classification": str,
+    "observed_facts": [str],
+    "related_candidate_ids": [str],
+    "explanation": str
+  }],
+  "workflow_issues": {issue_id: {
+    "id": same issue_id,
+    "symptom": str,
+    "capability_gap": str,
+    "likely_root_causes": [str],
+    "affected_scope": [str],
+    "evidence_refs": [str],
+    "uncertainty": str
+  }},
+  "target_candidate_exclusions": {candidate_id: reason},
+  "whole_picture_summary": str
+}
+`classification` is one of: delivered, target_attempt_failed,
+workflow_interface_failed, workflow_execution_failed, mixed, or inconclusive."""
+
+
+CASE_ANALYSIS_PROMPT = """You are the Case Analysis stage inside AgentReforge's
+Orchestrator. Analyze exactly ONE run of the TARGET AGENT on a disposable TASK
+WORKSPACE. Translate what the agent actually did, what code/artifacts it produced, how
+the resulting behavior flows, where the run succeeded or failed, and what the evidence
+does and does not imply.
+
+Call `get_target_run_trajectory` to inspect the complete ordered target-agent
+trajectory. Keep target-agent actions distinct from AgentReforge workflow events.
+Final-response prose is self-report; tool calls/results, artifacts, evaluation output,
+and ordered trajectory events are stronger evidence. Do not infer code behavior only
+from filenames or a final summary.
+
+Separate these ownership layers:
+- `target_agent`: a reusable planning/tool-use/state/verification capability;
+- `generated_artifact`: code produced in the disposable Task Workspace;
+- `task_definition`: an ambiguous, impossible, or non-discriminating requested task;
+- `environment`: dependencies, permissions, credentials, or runtime infrastructure;
+- `agentreforge_workflow`: evidence capture or execution failed outside the target;
+- `none` or `uncertain` when no failure or no attribution is supported.
+A missing flag/schema/algorithm in generated task code is an artifact symptom. It may
+support a reusable target-agent capability hypothesis, but it is never a request to add
+that task-specific feature to the target agent repository.
+
+Output ONLY one CaseAnalysis JSON object:
+{
+  "case_id": "case:<run_id>",
+  "run_id": "the exact supplied run_id",
+  "target_commit": str,
+  "task_intent": {"objective": str, "requirements": [str]},
+  "artifact_analysis": {
+    "summary": str,
+    "changed_components": [str],
+    "implemented_behavior": [str],
+    "behavior_flow": [str]
+  },
+  "final_status": "success|partial|failed|inconclusive",
+  "steps": [{
+    "step": str, "expected": str, "observed": str,
+    "status": "satisfied|failed|partial|not_observed",
+    "evidence_refs": [str]
+  }],
+  "final_outcome": str,
+  "causal_analysis": {
+    "failure_layer": "one declared ownership enum value",
+    "direct_cause": str,
+    "contributing_causes": [str],
+    "alternative_hypotheses": [{
+      "hypothesis": str, "evidence_for": [str], "evidence_against": [str]
+    }],
+    "uncertainty": str
+  },
+  "capability_signals": [{
+    "capability": str, "signal": "positive|negative|uncertain",
+    "evidence_refs": [str], "generalizability": str
+  }],
+  "improvement_opportunities": [{
+    "area": str, "rationale": str, "expected_effect": str
+  }]
+}
+Improvement opportunities are diagnostic possibilities, not selected Candidates or
+implementation instructions."""
+
+
+TRIAGE_PROMPT = """You are the Target-Agent Analysis stage inside one
+improvement Orchestrator.
 You diagnose the target agent; you do not propose code changes, rank solutions, design
 tests, or write an ImprovementProposal.
 
-Treat Git identity fields as deterministic facts. A target-agent run evaluates
-`target_commit` on a disposable TASK WORKSPACE. Failure of the generated artifact is
-capability evidence about that agent version; the task files do not need to exist in
-the TARGET AGENT REPOSITORY for the agent-level failure to be actionable.
+Case Analysis has already translated each current target-agent run into ordered
+actions, artifact behavior, causal hypotheses, and capability signals. Treat its Git
+identity fields as deterministic facts. Use the CaseAnalysisBoard as the primary
+decision input; inspect cited raw evidence only to resolve a material ambiguity.
+Failure of a generated artifact can be capability evidence about that target version,
+but preserve Case Analysis ownership and uncertainty.
 The task artifact's missing feature is a SYMPTOM, not the improvement itself. Diagnose
 the reusable TARGET AGENT capability that caused incomplete work (for example planning,
 tool use, state tracking, cross-component completion, or verification budgeting).
@@ -411,16 +558,16 @@ Never propose adding the task's domain feature or task-workspace files to the ta
 agent repository. `ProblemCase.affected_scope` names only target-agent source components
 or abstract agent capabilities visible in the supplied repository map.
 
-Audit every `current_run_alert`. For each alert, record the observed failure, its
-agent-level interpretation, plausible direct causes, evidence references, and exactly
-one disposition. A terminal failure may be deferred when evidence cannot identify an
-actionable agent-level problem, but "different task workspace" is not by itself a
-valid reason. Separate symptoms from hypotheses and state uncertainty.
+Audit every supplied current-run case. For each failed, partial, or inconclusive case,
+record its observed failure, agent-level interpretation, plausible direct causes,
+evidence references, and exactly one disposition. A case may be deferred when evidence
+cannot identify an actionable agent-level problem. Successful cases remain whole-picture
+capability evidence but do not require an AlertDisposition.
 
-Use current runs, the whole source-visible architecture, the dynamic backlog,
-achievements, and failed attempts. Current-commit evidence is authoritative; runs in
-`non_current_run_ids` are historical only. Use read-only tools to inspect source or a
-cited full event when needed. Output ONLY one DiagnosisBoard JSON object:
+Aggregate across cases instead of converting every local artifact defect into a new
+capability problem. Use the whole source-visible architecture and supplied target
+capability backlog. Use read-only tools to inspect source or cited evidence when
+needed. Output ONLY one DiagnosisBoard JSON object:
 {
   "alert_dispositions": [{
     "run_id": str, "observed_failure": str, "agent_level_interpretation": str,
@@ -452,6 +599,23 @@ Candidates improve reusable behavior of the TARGET AGENT source in `repository`;
 must never implement the disposable task workspace's domain feature inside the agent
 repository. Candidate affected_components must name real target-repository paths or
 abstract agent components from the supplied map.
+
+Keep these objects distinct throughout selection:
+- AGENT UNDER IMPROVEMENT: the reusable system whose `target_commit` is evaluated.
+- AGENT REPOSITORY: the source Writer may improve.
+- EVALUATION TASK: the coding problem used to expose capability evidence.
+- TASK WORKSPACE: the disposable project the target agent edits during that task.
+- DELIVERY SCENARIO: prompt + task workspace + environment + expected evidence.
+Task-specific names, flags, schemas, algorithms, and business rules belong to the
+Evaluation Task/Task Workspace. They are symptoms and test material, not candidate
+features. Before ranking an intervention, apply a transfer counterfactual: if the
+task domain, filenames, and interface names were changed, would the intervention still
+improve the agent? If not, classify it as task overfitting and do not select it.
+Do not preserve a task-specific noun while merely calling it "contract fidelity":
+the Candidate title, mechanism, expected delta, and affected components must describe
+the reusable agent mechanism. In particular, never propose adding an evaluation
+task's flag or interface to the target agent's own CLI. Trace each cited failure to
+the repository that actually owned the failing artifact before choosing scope.
 
 Fill the problem, causal, impact, and evaluability scorecards before ranking. Scores
 are advisory (1 low, 5 high); NEVER compute a weighted total. Rank by problem
@@ -512,36 +676,175 @@ SelectedChangeContract. Do not re-diagnose, re-rank, choose another Candidate, o
 reproduce the SelectionDecision.
 
 Create one causally coherent Change Contract: objective, rationale,
-diagnosis/intervention snapshots, inputs,
-expected outputs, behaviors, constraints, invariants, prohibited shortcuts, affected
-components, concise allowed write suggestions, reviewer focus, acceptance criteria,
-delivery runs/scenarios, checklist, and rollback plan.
+diagnosis/intervention snapshots, inputs, expected outputs, behaviors, constraints,
+invariants, prohibited shortcuts, affected components, concise allowed write
+suggestions, reviewer focus, and safety properties.
 
 The Contract is guidance for Writer/Reviewer/Deliverer, not a hard file boundary.
-Design one or two frozen end-to-end scenarios only when they can distinguish the
-selected capability. Scenario commands are argv arrays; use {prompt}/{workspace} only
-when the real CLI accepts them. Process claims require trajectory evidence. Safety
-properties are empty by default; path_confinement is declared only when the selected
-change touches that boundary. Call validate_plan once with the single contract id.
+The Writer edits the AGENT REPOSITORY. The Scenario runs that agent against a disposable
+TASK WORKSPACE. Never convert a task-workspace symptom (a flag, schema, algorithm,
+service, or business rule) into a feature of the agent repository. The Contract's
+mechanism must remain useful when task domain names and interfaces are replaced.
+A generic label such as "contract fidelity" does not make a task-specific interface
+reusable. Do not introduce task-specific detail during expansion.
+When downstream control flow must distinguish completed, blocked, incomplete, or
+verification-failed outcomes, require a typed/structured status separate from the
+human-readable summary. Never design control flow around broad keyword matching in
+free-form final prose.
 
-Each acceptance criterion is an object with: id, description,
-mode (red_green|invariant|metric_improvement|non_regression|manual),
-check_type (unit|integration|smoke), verification (command|review|manual), command,
-expected_exit_code, required_output_contains, forbidden_output_contains,
-verified_safety_properties, test_level (full|focused|basic), and required.
+Do NOT design acceptance criteria, delivery commands, Delivery Scenarios, a delivery
+checklist, or rollback plan in this stage. A separate Delivery Design stage receives
+this frozen Contract. Leave those defaulted fields absent. Safety properties are empty
+by default; declare `path_confinement` only when the selected change touches that
+boundary.
+
 Each evidence item is an object with source_type
 (trajectory|test|benchmark|code|log), reference, and observation.
 
 Output ONLY one ContractExpansion JSON object:
 {
   "proposal_guardrails": [{"id": str, "description": str}],
-  "selected_change_contract": {the complete contract described above},
+  "selected_change_contract": {
+    "contract_id": str,
+    "backlog_item_id": "the exact frozen selected_candidate_id",
+    "backlog_revision": int,
+    "objective": str,
+    "rationale": str,
+    "diagnosis": "the selected Candidate diagnosis object unchanged",
+    "intervention": "the selected Candidate intervention object unchanged",
+    "inputs": [{"id": str, "description": str}],
+    "expected_outputs": [{
+      "id": str,
+      "description": "the concrete externally or internally observable result",
+      "rationale": "why this result demonstrates the selected capability",
+      "evidence_direction": "what evidence should become present, absent, increase, or decrease"
+    }],
+    "required_behaviors": [{"id": str, "description": str}],
+    "implementation_constraints": [{"id": str, "description": str}],
+    "invariants": [{"id": str, "description": str}],
+    "prohibited_shortcuts": [{"id": str, "description": str}],
+    "affected_components": [str],
+    "allowed_write_paths": [str],
+    "reviewer_focus": [str],
+    "required_safety_properties": []
+  },
   "evidence": [{"source_type": "trajectory|test|benchmark|code|log",
     "reference": str, "observation": str}],
   "goals": [str], "non_goals": [str], "affected_components": [str],
   "dependencies": [str], "alternatives_considered": [str]
 }
 The coordinator—not you—joins this artifact with the frozen SelectionDecision."""
+
+
+SCENARIO_DEFINITION_PROMPT = """You are the Scenario Definition stage inside one
+improvement Orchestrator. Selection and the Change Contract are frozen. Define WHAT
+single representative coding case would causally distinguish the selected target-agent
+capability. Do not decide HOW to launch or materialize it.
+
+The case is an ordinary product-code task for the TARGET AGENT to solve in a disposable
+TASK WORKSPACE. It is never a request for the agent to modify, test, or copy its own
+agent repository. Define one case with enough internal requirements to expose the
+capability. Do not emit commands, repository paths, source-file contents, fixture
+files, environment setup, budgets, or implementation components from the target-agent
+repository.
+
+Fill `task_contract` as a structured form: objective, context, numbered requirements,
+constraints, outcome_contract, and acceptance checks. Each outcome condition needs an
+id, description, rationale, and evidence_direction. Primary success establishes the
+positive outcome; guardrails can veto but cannot prove success; inconclusive conditions
+say when the run cannot support a conclusion.
+
+Describe abstract workspace roles in `workspace_requirements`, such as "existing
+implementation", "focused tests", or "project metadata". Describe the causal contrast
+in `comparison`, including confounders. Each `evidence_requirement` is a semantic claim,
+classified as `target_agent_action`, `task_artifact`, or `environment_result`, and
+references the outcome-condition or acceptance-check ids it supports. Do not choose
+concrete event sources here.
+
+Keep this handoff compact enough to remain atomic: the serialized JSON must be under
+4,000 characters. Use concise sentences and do not repeat Contract prose. Use at most
+3 context facts, 3 requirements, 2 constraints, 2 primary-success conditions,
+1 guardrail, 1 inconclusive condition, 3 acceptance checks, 3 workspace requirements,
+and 4 evidence requirements. These are protocol size limits, not scoring rules.
+
+Output ONLY one DeliveryCaseDefinition JSON object:
+{
+  "contract_id": "the exact frozen contract_id",
+  "case_id": str,
+  "capability_under_test": str,
+  "task_contract": "ScenarioTaskContract object",
+  "workspace_requirements": [{
+    "id": str, "role": str, "required_initial_state": str, "purpose": str
+  }],
+  "comparison": {
+    "baseline_prediction": str, "candidate_prediction": str,
+    "observable_difference": str, "confounders": [str]
+  },
+  "evidence_requirements": [{
+    "id": str, "claim": str,
+    "subject": "target_agent_action|task_artifact|environment_result",
+    "related_condition_ids": [str]
+  }]
+}"""
+
+
+SCENARIO_MATERIALIZATION_PROMPT = """You are the Scenario Materialization stage inside
+one improvement Orchestrator. The Change Contract and Delivery Case Definition are
+frozen. Design only HOW to execute that exact case. Never change its capability,
+task_contract, predictions, outcome conditions, or evidence claims.
+
+Materialize the abstract workspace requirements as literal executable source, tests,
+and project metadata in `workspace_seed_files`. The files belong only to one disposable
+ordinary CODING TASK WORKSPACE. Never copy the target-agent package or its affected
+components into that workspace. The Scenario command must launch the real TARGET AGENT
+from the candidate AGENT REPOSITORY and direct it to edit the disposable Task Workspace.
+
+`command` is an argv array beginning with an executable. It must include `{prompt}` and
+`{workspace}` exactly where the real target-agent CLI accepts the task and workspace;
+never replace the structured task with a shorter literal prompt, and never put shell
+syntax such as `NAME=value` in argv. Runtime prerequisites belong in
+`environment_requirements`. Bind every frozen evidence requirement exactly once in
+`observation_bindings`. Evidence sources accept ONLY `agent_input`, `agent_output`,
+`tool_call`, `tool_result`, `artifact`, `final_output`, or `log`. Use
+`tool_call`/`tool_result` for internal actions and `artifact` for generated code; never
+use `trajectory` or `code`.
+
+Use budgets to separate total model turns from meaningful write/run actions; reads and
+searches do not consume max_action_steps. Every `delivery_run` item is a directly
+executable shell command in the candidate Agent Repository and cannot contain
+`{workspace}` or `{prompt}`. Acceptance commands also run in the candidate repository
+and cannot contain those placeholders. The primary Scenario is the only execution
+against the disposable workspace. Prose belongs in `delivery_checklist`.
+
+Each acceptance criterion contains id, description, mode
+(red_green|invariant|metric_improvement|non_regression|manual), check_type
+(unit|integration|smoke), verification (command|review|manual), command,
+expected_exit_code, required_output_contains, forbidden_output_contains,
+verified_safety_properties, test_level (full|focused|basic), and required.
+`verified_safety_properties` must be empty unless the frozen Contract declares it.
+
+Output ONLY one DeliveryExecutionDesign JSON object:
+{
+  "contract_id": "the exact frozen contract_id",
+  "case_id": "the exact frozen case_id",
+  "acceptance_criteria": ["AcceptanceCriterion objects"],
+  "delivery_run": [str],
+  "scenario_execution": {
+    "command": [str],
+    "workspace_seed_files": {"relative/path": "literal file content"},
+    "environment_requirements": [str],
+    "observation_bindings": [{
+      "evidence_requirement_id": str, "component": str,
+      "evidence_sources": [
+        "agent_input|agent_output|tool_call|tool_result|artifact|final_output|log"
+      ]
+    }],
+    "budgets": {"max_agent_turns": int, "max_action_steps": int},
+    "executable_conditions": ["ExecutableCondition objects"]
+  },
+  "delivery_checklist": [str],
+  "rollback_plan": str
+}"""
 
 
 class Orchestrator:
@@ -558,8 +861,13 @@ class Orchestrator:
         self.cwd = cwd
         self.code_index = code_index
         self.history_index = history_index
+        self.last_workflow_diagnosis: WorkflowDiagnosisBoard | None = None
+        self.last_case_analysis: CaseAnalysisBoard | None = None
         self.last_diagnosis: DiagnosisBoard | None = None
         self.last_selection: SelectionDecision | None = None
+        self.last_contract_expansion: ContractExpansion | None = None
+        self.last_case_definition: DeliveryCaseDefinition | None = None
+        self.last_delivery_execution: DeliveryExecutionDesign | None = None
         # analyst gets read-only tools ONLY — it must never modify code.
         self.registry = _read_only_registry(registry)
         # plus a deterministic DAG check it must run before finalizing its plan.
@@ -580,17 +888,69 @@ class Orchestrator:
             previous_reforge_loops=loop_history or [],
             run_manifest={},
         )
-        # The initial prompt contains a bounded evidence catalog. This read-only
-        # drill-down tool exposes the full selected TARGET event by stable id.
-        self.registry.register(_evidence_tool(context))
-        self.registry.register(_reforge_loop_tool(context))
-        if self.history_index is not None:
-            self.registry.register(_history_tool(context, self.history_index))
+        # Stage tool surfaces follow the same boundary as their input payloads.
+        # Workflow Analysis can drill into Reforge Loops but cannot inspect target
+        # evidence/source. Target stages can inspect target evidence/source but
+        # cannot read workflow records.
+        target_registry = self.registry
+        target_registry.register(_evidence_tool(context))
+        if context.current_run_ids:
+            target_registry.register(_target_run_trajectory_tool(context))
+        workflow_registry = ToolRegistry()
+        workflow_registry.register(_reforge_loop_tool(context))
 
+        workflow_request = _build_workflow_triage_request(context)
+        workflow_text = await self._investigate_stage(
+            system_prompt=WORKFLOW_TRIAGE_PROMPT,
+            user_message=workflow_request,
+            max_turns=max_turns,
+            registry=workflow_registry,
+        )
+        workflow_diagnosis = await self._parse_stage_with_repair(
+            workflow_text,
+            WorkflowDiagnosisBoard,
+            system_prompt=WORKFLOW_TRIAGE_PROMPT,
+            stage_name="WorkflowDiagnosisBoard",
+            validate=lambda board: _validate_workflow_diagnosis(board, context),
+            repair_context=workflow_request,
+        )
+        self.last_workflow_diagnosis = workflow_diagnosis
+
+        cases: dict[str, CaseAnalysis] = {}
+        for target_run in context.target_agent_runs:
+            if not target_run.is_current:
+                continue
+            case_request = _build_case_analysis_request(context, target_run.run_id)
+            case_text = await self._investigate_stage(
+                system_prompt=CASE_ANALYSIS_PROMPT,
+                user_message=case_request,
+                max_turns=max_turns,
+                registry=target_registry,
+            )
+            case = await self._parse_stage_with_repair(
+                case_text,
+                CaseAnalysis,
+                system_prompt=CASE_ANALYSIS_PROMPT,
+                stage_name=f"CaseAnalysis[{target_run.run_id}]",
+                validate=lambda item, run_id=target_run.run_id: (
+                    _validate_case_analysis(item, run_id)
+                ),
+                repair_context=case_request,
+            )
+            cases[target_run.run_id] = case
+        case_analysis = CaseAnalysisBoard(cases=cases)
+        self.last_case_analysis = case_analysis
+
+        triage_request = _build_triage_request(
+            context,
+            workflow_diagnosis,
+            case_analysis,
+        )
         triage_text = await self._investigate_stage(
             system_prompt=TRIAGE_PROMPT,
-            user_message=_build_triage_request(context),
+            user_message=triage_request,
             max_turns=max_turns,
+            registry=target_registry,
         )
         diagnosis = await self._parse_stage_with_repair(
             triage_text,
@@ -598,13 +958,20 @@ class Orchestrator:
             system_prompt=TRIAGE_PROMPT,
             stage_name="DiagnosisBoard",
             validate=lambda board: _validate_triage_coverage(board, context),
+            repair_context=triage_request,
         )
         self.last_diagnosis = diagnosis
 
+        selection_request = _build_selection_request(
+            context,
+            diagnosis,
+            workflow_diagnosis,
+        )
         selection_text = await self._investigate_stage(
             system_prompt=SELECTION_PROMPT,
-            user_message=_build_selection_request(context, diagnosis),
+            user_message=selection_request,
             max_turns=max_turns,
+            registry=target_registry,
         )
         selection = await self._parse_stage_with_repair(
             selection_text,
@@ -612,16 +979,19 @@ class Orchestrator:
             system_prompt=SELECTION_PROMPT,
             stage_name="SelectionDecision",
             validate=lambda item: _validate_selection(item, context),
+            repair_context=selection_request,
         )
         self.last_selection = selection
 
         if selection.decision == "abstain":
             proposal = _abstaining_proposal(selection)
         else:
+            contract_request = _build_contract_request(context, diagnosis, selection)
             contract_text = await self._investigate_stage(
                 system_prompt=CONTRACT_PROMPT,
-                user_message=_build_contract_request(context, diagnosis, selection),
+                user_message=contract_request,
                 max_turns=max_turns,
+                registry=target_registry,
             )
             expansion = await self._parse_stage_with_repair(
                 contract_text,
@@ -629,26 +999,88 @@ class Orchestrator:
                 system_prompt=CONTRACT_PROMPT,
                 stage_name="ContractExpansion",
                 validate=lambda item: _validate_contract_selection(item, selection),
+                repair_context=contract_request,
+            )
+            self.last_contract_expansion = expansion
+            case_definition_request = _build_scenario_definition_request(
+                context,
+                diagnosis,
+                selection,
+                expansion,
+            )
+            case_definition_text = await self._complete_typed_stage(
+                system_prompt=SCENARIO_DEFINITION_PROMPT,
+                user_message=case_definition_request,
+            )
+            case_definition = await self._parse_stage_with_repair(
+                case_definition_text,
+                DeliveryCaseDefinition,
+                system_prompt=SCENARIO_DEFINITION_PROMPT,
+                stage_name="DeliveryCaseDefinition",
+                validate=lambda item: _validate_case_definition(item, expansion),
+                repair_context=case_definition_request,
+            )
+            self.last_case_definition = case_definition
+
+            execution_request = _build_scenario_materialization_request(
+                context,
+                expansion,
+                case_definition,
+            )
+            execution_text = await self._complete_typed_stage(
+                system_prompt=SCENARIO_MATERIALIZATION_PROMPT,
+                user_message=execution_request,
+            )
+            delivery_execution = await self._parse_stage_with_repair(
+                execution_text,
+                DeliveryExecutionDesign,
+                system_prompt=SCENARIO_MATERIALIZATION_PROMPT,
+                stage_name="DeliveryExecutionDesign",
+                validate=lambda item: _validate_delivery_execution(
+                    item,
+                    expansion,
+                    case_definition,
+                ),
+                repair_context=execution_request,
+            )
+            self.last_delivery_execution = delivery_execution
+            expansion = _attach_delivery_execution(
+                expansion,
+                case_definition,
+                delivery_execution,
             )
             proposal = _proposal_from_contract(selection, expansion)
 
         # Decision artifacts are coordinator-owned and cannot drift during
         # contract expansion. The final Proposal remains the unchanged downstream
         # interface used by Gate, Writer, Reviewer, and Deliverer.
-        return _attach_frozen_decision(proposal, diagnosis, selection)
+        return _attach_frozen_decision(
+            proposal,
+            diagnosis,
+            selection,
+            workflow_diagnosis=workflow_diagnosis,
+            case_analysis=case_analysis,
+        )
 
     async def revise(self, proposal: ImprovementProposal, problem: str) -> ImprovementProposal:
         """Re-generate the proposal to fix a specific problem (e.g. an invalid DAG)."""
         # feed the problem + the previous proposal back; ask for a corrected one.
-        msg = (
-            f"Your previous proposal had a problem that must be fixed:\n{problem}\n\n"
-            f"Previous proposal:\n{proposal.model_dump_json(indent=2)}\n\n"
-            "Output ONLY a corrected proposal as a single ```json block — fix the "
-            "problem and keep everything else valid. For a missing safety-property "
-            "mapping, update BOTH sides: tag an invariant acceptance criterion with "
-            "`verified_safety_properties`, leave its command empty because the probe is "
-            "system-owned, and declare the same safety property in the Selected Change "
-            "Contract. The Contract is the only execution unit and has no Task DAG."
+        msg = json.dumps(
+            {
+                "request_kind": "revise_improvement_proposal",
+                "problem": problem,
+                "previous_proposal": proposal.model_dump(mode="json"),
+                "revision_constraints": [
+                    "Fix the reported problem and keep all other valid fields stable.",
+                    (
+                        "For a missing safety-property mapping, update both the "
+                        "criterion verified_safety_properties and the Selected "
+                        "Change Contract; system-owned probes have empty commands."
+                    ),
+                    "The Contract is the only execution unit and has no Task DAG.",
+                ],
+            },
+            ensure_ascii=False,
         )
         text = await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
@@ -661,6 +1093,8 @@ class Orchestrator:
             corrected,
             artifacts.diagnosis,
             artifacts.selection,
+            workflow_diagnosis=artifacts.workflow_diagnosis,
+            case_analysis=artifacts.case_analysis,
         )
 
     async def _parse_proposal_with_repair(
@@ -689,6 +1123,7 @@ class Orchestrator:
         system_prompt: str,
         stage_name: str,
         validate,
+        repair_context: str = "",
         max_repairs: int = 2,
     ):
         """Repair only the stage whose typed handoff is invalid."""
@@ -709,6 +1144,8 @@ class Orchestrator:
                     str(exc),
                     system_prompt=system_prompt,
                     stage_name=stage_name,
+                    schema=model_cls.model_json_schema(),
+                    immutable_context=repair_context,
                 )
         raise AssertionError("unreachable")
 
@@ -718,11 +1155,12 @@ class Orchestrator:
         system_prompt: str,
         user_message: str,
         max_turns: int,
+        registry: ToolRegistry | None = None,
     ) -> str:
         text = ""
         async for event in query(
             client=self.client,
-            registry=self.registry,
+            registry=registry or self.registry,
             system_prompt=system_prompt,
             user_message=user_message,
             cwd=self.cwd,
@@ -734,6 +1172,20 @@ class Orchestrator:
             elif event.get("type") == "error":
                 raise event["error"]
         return text
+
+    async def _complete_typed_stage(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+    ) -> str:
+        """Generate a pure typed transformation without ReAct text/tool turns."""
+
+        return await collect_text(
+            self.client,
+            [Message(role="user", content=user_message)],
+            system_prompt=system_prompt,
+        )
 
     async def _investigate(
         self,
@@ -750,11 +1202,14 @@ class Orchestrator:
 
     async def _repair(self, bad_output: str, error: str) -> str:
         # feed the model its own output + the validation error; ask for corrected JSON.
-        msg = (
-            f"Your JSON did not satisfy the schema:\n{error}\n\n"
-            f"Your previous output was:\n{bad_output}\n\n"
-            "Output ONLY the corrected proposal as a single ```json block that matches "
-            "the schema exactly (fix the field types shown in the error)."
+        msg = json.dumps(
+            {
+                "request_kind": "repair_improvement_proposal",
+                "validation_error": error,
+                "previous_invalid_output": bad_output,
+                "required_output": "ImprovementProposal",
+            },
+            ensure_ascii=False,
         )
         return await collect_text(
             self.client, [Message(role="user", content=msg)], system_prompt=ORCHESTRATOR_PROMPT
@@ -767,12 +1222,30 @@ class Orchestrator:
         *,
         system_prompt: str,
         stage_name: str,
+        schema: dict[str, Any],
+        immutable_context: str = "",
     ) -> str:
-        msg = (
-            f"Your {stage_name} handoff was invalid:\n{error}\n\n"
-            f"Previous output:\n{bad_output}\n\n"
-            f"Output ONLY a corrected {stage_name} JSON object. Preserve valid "
-            "judgments and fix only the reported schema or handoff problem."
+        output_constraint = (
+            "Return one complete compact JSON object under 4,000 characters; "
+            "remove repetition before removing required fields."
+            if stage_name == "DeliveryCaseDefinition"
+            else "Return one complete JSON object and no surrounding prose."
+        )
+        msg = json.dumps(
+            {
+                "request_kind": "repair_orchestrator_stage",
+                "stage_name": stage_name,
+                "validation_error": error,
+                "previous_invalid_output": bad_output,
+                "authoritative_json_schema": schema,
+                "immutable_stage_input": immutable_context[:48_000],
+                "repair_scope": (
+                    "Preserve valid judgments and fix only the reported schema "
+                    "or handoff problem."
+                ),
+                "output_constraint": output_constraint,
+            },
+            ensure_ascii=False,
         )
         return await collect_text(
             self.client,
@@ -792,12 +1265,16 @@ def _read_only_registry(registry: ToolRegistry) -> ToolRegistry:
 def _build_request(context: OrchestratorContext) -> str:
     """Serialize one mandatory, typed management view instead of raw mixed logs."""
 
-    return (
-        "OrchestratorContext (deterministically prepared; trajectory kinds are separate):\n"
-        f"```json\n{json.dumps(context.model_dump(mode='json'), ensure_ascii=False, indent=2)}\n"
-        "```\n\nFollow PHASES 1-5 in order. Use evidence references from the context and "
-        "inspect the real source with read-only tools. Then output the final "
-        "ImprovementProposal JSON."
+    return json.dumps(
+        {
+            "request_kind": "legacy_full_orchestration",
+            "instructions": (
+                "Follow phases 1-5, inspect cited source/evidence, and return "
+                "ImprovementProposal."
+            ),
+            "orchestrator_context": context.model_dump(mode="json"),
+        },
+        ensure_ascii=False,
     )
 
 
@@ -819,61 +1296,98 @@ def _compact_evidence_index(context: OrchestratorContext) -> list[dict[str, Any]
     ]
 
 
-def _build_triage_request(context: OrchestratorContext) -> str:
+def _build_workflow_triage_request(context: OrchestratorContext) -> str:
+    return json.dumps(
+        {
+            "request_kind": "workflow_analysis",
+            "previous_reforge_loops": [
+                item.model_dump(mode="json") for item in context.previous_reforge_loops
+            ],
+            "run_manifest": context.run_manifest,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_case_analysis_request(
+    context: OrchestratorContext,
+    run_id: str,
+) -> str:
+    target_run = next(
+        item for item in context.target_agent_runs if item.run_id == run_id
+    )
+    return json.dumps(
+        {
+            "request_kind": "case_analysis",
+            "target_run_semantics": context.target_run_semantics,
+            "current_target_commit": context.current_target_commit,
+            "target_run": target_run.model_dump(mode="json"),
+            "evidence_index": [
+                item
+                for item in _compact_evidence_index(context)
+                if item.get("run_id") == run_id
+            ],
+            "required_tool_call": {
+                "tool": "get_target_run_trajectory",
+                "run_id": run_id,
+                "purpose": (
+                    "Inspect all ordered target-agent actions and results before "
+                    "interpreting the case."
+                ),
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _target_backlog(
+    context: OrchestratorContext,
+    workflow: WorkflowDiagnosisBoard,
+) -> dict[str, Any]:
+    excluded = set(workflow.target_candidate_exclusions)
+    return {
+        key: item.model_dump(mode="json")
+        for key, item in context.improvement_backlog.items()
+        if key not in excluded
+    }
+
+
+def _build_triage_request(
+    context: OrchestratorContext,
+    workflow: WorkflowDiagnosisBoard,
+    case_analysis: CaseAnalysisBoard,
+) -> str:
     payload = {
+        "request_kind": "target_analysis",
         "improvement_intent": context.improvement_intent,
         "target_run_semantics": context.target_run_semantics,
         "current_target_commit": context.current_target_commit,
         "current_run_ids": context.current_run_ids,
-        "non_current_run_ids": context.non_current_run_ids,
-        "current_run_alerts": [
-            item.model_dump(mode="json") for item in context.current_run_alerts
+        "required_disposition_run_ids": [
+            item.run_id for item in context.current_run_alerts
         ],
-        "target_agent_runs": [
-            item.model_dump(mode="json") for item in context.target_agent_runs
-        ],
-        "previous_reforge_loops": [
-            item.model_dump(mode="json") for item in context.previous_reforge_loops
-        ],
-        "improvement_backlog": {
-            key: item.model_dump(mode="json")
-            for key, item in context.improvement_backlog.items()
-        },
+        "case_analysis_board": case_analysis.model_dump(mode="json"),
+        "improvement_backlog": _target_backlog(context, workflow),
         "repository": context.repository.model_dump(mode="json"),
         "run_manifest": context.run_manifest,
-        "evidence_index": _compact_evidence_index(context),
     }
-    return (
-        "Produce the evidence/problem triage artifact from this deterministic view. "
-        "Retrieve full evidence only when a cited detail matters.\n```json\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-        + "\n```"
-    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _build_selection_request(
     context: OrchestratorContext,
     diagnosis: DiagnosisBoard,
+    workflow: WorkflowDiagnosisBoard,
 ) -> str:
     payload = {
+        "request_kind": "candidate_selection",
         "improvement_intent": context.improvement_intent,
         "diagnosis_board": diagnosis.model_dump(mode="json"),
-        "previous_reforge_loops": [
-            item.model_dump(mode="json") for item in context.previous_reforge_loops
-        ],
-        "improvement_backlog": {
-            key: item.model_dump(mode="json")
-            for key, item in context.improvement_backlog.items()
-        },
+        "improvement_backlog": _target_backlog(context, workflow),
         "repository": context.repository.model_dump(mode="json"),
         "run_manifest": context.run_manifest,
     }
-    return (
-        "Generate interventions and make the one-Loop selection from this already "
-        "triaged decision view.\n```json\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-        + "\n```"
-    )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _build_contract_request(
@@ -884,6 +1398,7 @@ def _build_contract_request(
     selected = selection.candidate_backlog.get(selection.selected_candidate_id)
     refs = set(selected.diagnosis.evidence_refs if selected is not None else [])
     payload = {
+        "request_kind": "contract_expansion",
         "selection_decision": selection.model_dump(mode="json"),
         "selected_problem_cases": {
             key: item.model_dump(mode="json")
@@ -898,11 +1413,97 @@ def _build_contract_request(
             if not refs or item.get("event_id") in refs
         ],
     }
-    return (
-        "Expand the frozen selection into one execution-level proposal. Inspect the "
-        "real source and call validate_plan before final output.\n```json\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-        + "\n```"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _build_scenario_definition_request(
+    context: OrchestratorContext,
+    diagnosis: DiagnosisBoard,
+    selection: SelectionDecision,
+    expansion: ContractExpansion,
+) -> str:
+    selected = selection.candidate_backlog.get(selection.selected_candidate_id)
+    refs = set(selected.diagnosis.evidence_refs if selected is not None else [])
+    return json.dumps(
+        {
+            "request_kind": "scenario_definition",
+            "selected_change_contract": {
+                "contract_id": expansion.selected_change_contract.contract_id,
+                "objective": expansion.selected_change_contract.objective,
+                "rationale": expansion.selected_change_contract.rationale,
+                "diagnosis": expansion.selected_change_contract.diagnosis.model_dump(
+                    mode="json"
+                ),
+                "intervention": (
+                    expansion.selected_change_contract.intervention.model_dump(
+                        mode="json"
+                    )
+                ),
+                "expected_outputs": [
+                    item.model_dump(mode="json")
+                    for item in expansion.selected_change_contract.expected_outputs
+                ],
+                "required_behaviors": [
+                    item.model_dump(mode="json")
+                    for item in expansion.selected_change_contract.required_behaviors
+                ],
+                "implementation_constraints": [
+                    item.model_dump(mode="json")
+                    for item in (
+                        expansion.selected_change_contract.implementation_constraints
+                    )
+                ],
+                "invariants": [
+                    item.model_dump(mode="json")
+                    for item in expansion.selected_change_contract.invariants
+                ],
+                "prohibited_shortcuts": [
+                    item.model_dump(mode="json")
+                    for item in expansion.selected_change_contract.prohibited_shortcuts
+                ],
+                "required_safety_properties": (
+                    expansion.selected_change_contract.required_safety_properties
+                ),
+            },
+            "proposal_context": {
+                "guardrails": [
+                    item.model_dump(mode="json")
+                    for item in expansion.proposal_guardrails
+                ],
+                "goals": expansion.goals,
+                "non_goals": expansion.non_goals,
+            },
+            "selected_problem_cases": {
+                key: item.model_dump(mode="json")
+                for key, item in diagnosis.problem_cases.items()
+                if not refs or refs.intersection(item.evidence_refs)
+            },
+            "relevant_evidence_index": [
+                item
+                for item in _compact_evidence_index(context)
+                if not refs or item.get("event_id") in refs
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_scenario_materialization_request(
+    context: OrchestratorContext,
+    expansion: ContractExpansion,
+    case_definition: DeliveryCaseDefinition,
+) -> str:
+    return json.dumps(
+        {
+            "request_kind": "scenario_materialization",
+            "frozen_case_definition": case_definition.model_dump(mode="json"),
+            "target_agent_repository": context.repository.model_dump(mode="json"),
+            "run_manifest": context.run_manifest,
+            "declared_safety_properties": (
+                expansion.selected_change_contract.required_safety_properties
+            ),
+        },
+        ensure_ascii=False,
     )
 
 
@@ -926,6 +1527,38 @@ def _validate_triage_coverage(
     ]
     if mismatched:
         problems.append("problem_cases keys must match ids: " + ", ".join(mismatched))
+    return problems
+
+
+def _validate_case_analysis(
+    case: CaseAnalysis,
+    run_id: str,
+) -> list[str]:
+    problems = []
+    if case.run_id != run_id:
+        problems.append(f"run_id must preserve the supplied run id {run_id!r}")
+    if case.case_id != f"case:{run_id}":
+        problems.append(f"case_id must equal 'case:{run_id}'")
+    return problems
+
+
+def _validate_workflow_diagnosis(
+    board: WorkflowDiagnosisBoard,
+    context: OrchestratorContext,
+) -> list[str]:
+    known_loops = {item.loop_id for item in context.previous_reforge_loops}
+    assessed = [item.loop_id for item in board.loop_assessments]
+    problems = []
+    if len(assessed) != len(set(assessed)):
+        problems.append("each prior Loop may appear only once in loop_assessments")
+    unknown = sorted(set(assessed) - known_loops)
+    if unknown:
+        problems.append("workflow analysis references unknown Loops: " + ", ".join(unknown))
+    mismatched = [
+        key for key, issue in board.workflow_issues.items() if key != issue.id
+    ]
+    if mismatched:
+        problems.append("workflow_issues keys must match ids: " + ", ".join(mismatched))
     return problems
 
 
@@ -959,33 +1592,7 @@ def _validate_selection(
         and comparison.winner != selection.selected_candidate_id
     ):
         problems.append("Top-2 winner must equal selected_candidate_id")
-    if context is not None:
-        known_files = set(context.repository.files)
-        for candidate_id, candidate in selection.candidate_backlog.items():
-            unknown_paths = _unknown_repo_paths(
-                candidate.scope.affected_components,
-                known_files,
-            )
-            if unknown_paths:
-                problems.append(
-                    f"Candidate {candidate_id} references task-workspace/non-repository "
-                    "paths instead of target-agent components: "
-                    + ", ".join(unknown_paths)
-                )
     return problems
-
-
-def _unknown_repo_paths(items: list[str], known_files: set[str]) -> list[str]:
-    """Reject path-shaped task artifacts while allowing abstract component names."""
-
-    suffixes = (".py", ".ts", ".js", ".rs", ".go", ".java", ".toml", ".md")
-    return [
-        item
-        for item in items
-        if ("/" in item or item.endswith(suffixes))
-        and item not in known_files
-        and not any(path.startswith(item.rstrip("/") + "/") for path in known_files)
-    ]
 
 
 def _validate_contract_selection(
@@ -996,6 +1603,190 @@ def _validate_contract_selection(
     if contract.backlog_item_id != selection.selected_candidate_id:
         return ["contract backlog_item_id must equal the frozen selection"]
     return []
+
+
+def _validate_case_definition(
+    definition: DeliveryCaseDefinition,
+    expansion: ContractExpansion,
+) -> list[str]:
+    problems = []
+    if definition.contract_id != expansion.selected_change_contract.contract_id:
+        problems.append(
+            "case definition contract_id must equal the frozen Change Contract id"
+        )
+    condition_ids = {
+        item.id
+        for group in (
+            definition.task_contract.outcome_contract.primary_success,
+            definition.task_contract.outcome_contract.guardrails,
+            definition.task_contract.outcome_contract.inconclusive,
+        )
+        for item in group
+    }
+    condition_ids.update(
+        item.id for item in definition.task_contract.acceptance_checks
+    )
+    requirement_ids = [item.id for item in definition.evidence_requirements]
+    if len(requirement_ids) != len(set(requirement_ids)):
+        problems.append("evidence requirement ids must be unique")
+    unknown_conditions = sorted(
+        {
+            condition_id
+            for requirement in definition.evidence_requirements
+            for condition_id in requirement.related_condition_ids
+            if condition_id not in condition_ids
+        }
+    )
+    if unknown_conditions:
+        problems.append(
+            "evidence requirements reference unknown condition ids: "
+            + ", ".join(unknown_conditions)
+        )
+    return problems
+
+
+def _validate_delivery_execution(
+    design: DeliveryExecutionDesign,
+    expansion: ContractExpansion,
+    definition: DeliveryCaseDefinition,
+) -> list[str]:
+    problems = []
+    if design.contract_id != expansion.selected_change_contract.contract_id:
+        problems.append(
+            "delivery execution contract_id must equal the frozen Change Contract id"
+        )
+    if design.case_id != definition.case_id:
+        problems.append("delivery execution case_id must equal the frozen case id")
+    declared_safety = set(
+        expansion.selected_change_contract.required_safety_properties
+    )
+    undeclared_safety = sorted(
+        {
+            safety
+            for criterion in design.acceptance_criteria
+            for safety in criterion.verified_safety_properties
+            if safety not in declared_safety
+        }
+    )
+    if undeclared_safety:
+        problems.append(
+            "acceptance criteria reference undeclared safety properties: "
+            + ", ".join(undeclared_safety)
+        )
+    scenario = design.scenario_execution
+    if scenario is None:
+        problems.append("the frozen Delivery Case requires one scenario execution")
+        return problems
+    flattened_command = "\n".join(scenario.command)
+    if "{prompt}" not in flattened_command:
+        problems.append(
+            "scenario command must pass the frozen task contract via {prompt}"
+        )
+    if "{workspace}" not in flattened_command:
+        problems.append(
+            "scenario command must pass the disposable Task Workspace via {workspace}"
+        )
+    expected_bindings = {item.id for item in definition.evidence_requirements}
+    actual_bindings = [
+        item.evidence_requirement_id for item in scenario.observation_bindings
+    ]
+    if len(actual_bindings) != len(set(actual_bindings)):
+        problems.append("each evidence requirement may be bound only once")
+    missing_bindings = sorted(expected_bindings - set(actual_bindings))
+    unknown_bindings = sorted(set(actual_bindings) - expected_bindings)
+    if missing_bindings:
+        problems.append(
+            "missing observation bindings: " + ", ".join(missing_bindings)
+        )
+    if unknown_bindings:
+        problems.append(
+            "observation bindings reference unknown evidence requirements: "
+            + ", ".join(unknown_bindings)
+        )
+    placeholder_commands = [
+        command
+        for command in [
+            *design.delivery_run,
+            *[
+                criterion.command
+                for criterion in design.acceptance_criteria
+                if criterion.command
+            ],
+        ]
+        if "{workspace}" in command or "{prompt}" in command
+    ]
+    if placeholder_commands:
+        problems.append(
+            "repository-level delivery and acceptance commands cannot use "
+            "Scenario placeholders"
+        )
+    return problems
+
+
+def _attach_delivery_execution(
+    expansion: ContractExpansion,
+    definition: DeliveryCaseDefinition,
+    design: DeliveryExecutionDesign,
+) -> ContractExpansion:
+    """Join frozen case semantics to concrete execution without LLM reinterpretation."""
+
+    runtime = design.scenario_execution
+    scenarios: list[DeliveryScenario] = []
+    if runtime is not None:
+        requirements = {
+            item.id: item for item in definition.evidence_requirements
+        }
+        observations = [
+            ScenarioObservation(
+                id=requirement.id,
+                component=binding.component,
+                expected_behavior=requirement.claim,
+                evidence_sources=binding.evidence_sources,
+            )
+            for binding in runtime.observation_bindings
+            if (requirement := requirements.get(binding.evidence_requirement_id))
+            is not None
+        ]
+        trajectory_sources = {
+            "agent_input",
+            "agent_output",
+            "tool_call",
+            "tool_result",
+        }
+        requires_trajectory = any(
+            item.subject == "target_agent_action"
+            for item in definition.evidence_requirements
+        ) or any(
+            trajectory_sources.intersection(binding.evidence_sources)
+            for binding in runtime.observation_bindings
+        )
+        scenarios.append(
+            DeliveryScenario(
+                id=definition.case_id,
+                task_contract=definition.task_contract,
+                command=runtime.command,
+                fixture_files=runtime.workspace_seed_files,
+                environment_requirements=runtime.environment_requirements,
+                baseline_prediction=definition.comparison.baseline_prediction,
+                candidate_prediction=definition.comparison.candidate_prediction,
+                observable_difference=definition.comparison.observable_difference,
+                observations=observations,
+                budgets=runtime.budgets,
+                executable_conditions=runtime.executable_conditions,
+                requires_trajectory=requires_trajectory,
+            )
+        )
+
+    contract = expansion.selected_change_contract.model_copy(
+        update={
+            "acceptance_criteria": design.acceptance_criteria,
+            "delivery_run": design.delivery_run,
+            "delivery_scenarios": scenarios,
+            "delivery_checklist": design.delivery_checklist,
+            "rollback_plan": design.rollback_plan,
+        }
+    )
+    return expansion.model_copy(update={"selected_change_contract": contract})
 
 
 def _proposal_from_contract(
@@ -1030,6 +1821,9 @@ def _attach_frozen_decision(
     proposal: ImprovementProposal,
     diagnosis: DiagnosisBoard,
     selection: SelectionDecision,
+    *,
+    workflow_diagnosis: WorkflowDiagnosisBoard | None = None,
+    case_analysis: CaseAnalysisBoard | None = None,
 ) -> ImprovementProposal:
     """Prevent later contract/acceptance repair from changing the chosen problem."""
 
@@ -1048,6 +1842,8 @@ def _attach_frozen_decision(
             "decision": selection.decision,
             "decision_reason": selection.decision_reason,
             "orchestrator_artifacts": OrchestratorArtifacts(
+                workflow_diagnosis=workflow_diagnosis,
+                case_analysis=case_analysis,
                 diagnosis=diagnosis,
                 selection=selection,
             ),
@@ -1102,6 +1898,65 @@ def _evidence_tool(context: OrchestratorContext) -> Tool:
             required=["event_id"],
         ),
         handler=get_evidence,
+    )
+
+
+def _target_run_trajectory_tool(context: OrchestratorContext) -> Tool:
+    """Return every ordered action for one target run, never Reforge workflow events."""
+
+    async def get_run(args: dict, _tool_context: ToolContext) -> ToolResult:
+        run_id = str(args.get("run_id") or "").strip()
+        if not run_id:
+            return ToolResult(content="Error: 'run_id' is required.", is_error=True)
+        if run_id not in context.current_run_ids:
+            return ToolResult(
+                content=f"Error: current target-agent run not found: {run_id}",
+                is_error=True,
+            )
+        events = []
+        for event_id, record in context.raw_target_evidence.items():
+            record_run_id = str(
+                record.get("run_id") or record.get("session_id") or "unknown"
+            )
+            if record_run_id != run_id:
+                continue
+            item = dict(record)
+            item["event_id"] = event_id
+            for key in ("content", "final_response", "error"):
+                if isinstance(item.get(key), str):
+                    item[key] = item[key][:4_000]
+            events.append(item)
+        return ToolResult(
+            content=json.dumps(
+                {
+                    "run_id": run_id,
+                    "trajectory_kind": "target_agent",
+                    "events": events,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+    return Tool(
+        name="get_target_run_trajectory",
+        description=(
+            "Read the complete ordered TARGET AGENT trajectory for one current run, "
+            "including agent turns, tool calls/results, evaluation, and terminal output. "
+            "This never returns AgentReforge workflow events."
+        ),
+        parameters=object_schema(
+            {
+                "run_id": {
+                    "type": "string",
+                    "description": "Current target-agent run id",
+                    "enum": list(context.current_run_ids),
+                }
+            },
+            required=["run_id"],
+        ),
+        handler=get_run,
+        is_read_only=True,
     )
 
 

@@ -8,14 +8,17 @@ only wires the planner, the config, and the per-task worker message.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 from ..llm.base import LlmClient
 from ..orchestration.task_executor import (
+    WORKER_HANDOFF_CONTRACT,
     ExecutorConfig,
     TaskExecutor,
     run_streamed,
+    worker_handoff_error,
 )
 from ..plan.models import ExecutionPlan, Task
 from ..plan.planner import Planner
@@ -49,10 +52,15 @@ async def multi_agent(
         model=client.model_name,
         provider=client.provider_name,
         tool_names=registry.list_names(),
-    ).build()
+    ).build() + "\n\nFINAL OUTPUT CONTRACT:\n" + WORKER_HANDOFF_CONTRACT
     executor = TaskExecutor(client=client, registry=registry)
     config = ExecutorConfig(
-        review=True, parallel=True, max_rounds=max_retries + 1, max_task_turns=max_task_turns
+        review=True,
+        parallel=True,
+        max_rounds=max_retries + 1,
+        max_task_turns=max_task_turns,
+        worker_output_validate=worker_handoff_error,
+        worker_output_contract=WORKER_HANDOFF_CONTRACT,
     )
     async for event in run_streamed(
         executor,
@@ -61,6 +69,14 @@ async def multi_agent(
         config=config,
         system_prompt=system_prompt,
         build_task_message=lambda task, pl, fb: _worker_message(pl, task, fb.summary if fb else ""),
+        task_brief=lambda task: json.dumps(
+            {
+                "task_id": task.id,
+                "description": task.description,
+                "dependencies": task.dependencies,
+            },
+            ensure_ascii=False,
+        ),
         memory=memory,
         code_index=code_index,
     ):
@@ -72,17 +88,34 @@ async def multi_agent(
 
 
 def _worker_message(plan: ExecutionPlan, task: Task, feedback: str) -> str:
-    lines = [f"Overall goal: {plan.goal}", f"Your task: {task.description}"]
-    if task.dependencies:
-        lines.append("\nResults from prerequisite tasks:")
-        for dep_id in task.dependencies:
-            dep = plan.get(dep_id)
-            if dep:
-                lines.append(f"- [{dep.id}] {dep.description}: {dep.result}")
-    if feedback:
-        lines.append(f"\nA reviewer rejected your previous attempt. Fix this: {feedback}")
-    lines.append("\nComplete this task concretely, using tools when needed.")
-    return "\n".join(lines)
+    prerequisites = []
+    for dep_id in task.dependencies:
+        dep = plan.get(dep_id)
+        if dep:
+            prerequisites.append(
+                {
+                    "task_id": dep.id,
+                    "description": dep.description,
+                    "status": dep.status.value,
+                    "result": dep.result,
+                }
+            )
+    return json.dumps(
+        {
+            "request_kind": "execute_reviewed_task",
+            "overall_goal": plan.goal,
+            "task": {
+                "id": task.id,
+                "description": task.description,
+                "dependencies": task.dependencies,
+            },
+            "prerequisite_results": prerequisites,
+            "review_feedback": feedback,
+            "instruction": "Complete this task concretely, using tools when needed.",
+            "output_contract": WORKER_HANDOFF_CONTRACT,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _final_summary(plan: ExecutionPlan) -> str:

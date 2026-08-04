@@ -35,17 +35,49 @@ class RecursionPolicy:
 
 @dataclass(frozen=True)
 class RunProfile:
-    # effort maps to the SAME integer knobs the agent already uses (aligning with
-    # the existing worker), plus the upper bound on generated-test rigor.
-    max_rounds: int  # Writer<->Reviewer rounds per task
-    max_task_turns: int  # ReAct tool-turns per worker attempt
+    # One Review Cycle is exactly one Writer Attempt followed by one Reviewer Pass.
+    # Turn budgets are per invocation and reset on the next Review Cycle.
+    max_review_cycles: int
+    writer_plan_turns: int
+    writer_attempt_turns: int
+    reviewer_pass_turns: int
     test_ceiling: str  # highest test_level the analyzer may assign: basic|focused|full
+
+    @property
+    def max_rounds(self) -> int:
+        """Compatibility name for older reports and callers."""
+
+        return self.max_review_cycles
+
+    @property
+    def max_task_turns(self) -> int:
+        """Compatibility name; Writer and Reviewer no longer share this budget."""
+
+        return self.writer_attempt_turns
 
 
 _PROFILES: dict[DetailLevel, RunProfile] = {
-    DetailLevel.QUICK: RunProfile(max_rounds=2, max_task_turns=6, test_ceiling="basic"),
-    DetailLevel.STANDARD: RunProfile(max_rounds=4, max_task_turns=8, test_ceiling="focused"),
-    DetailLevel.DEEP: RunProfile(max_rounds=6, max_task_turns=12, test_ceiling="full"),
+    DetailLevel.QUICK: RunProfile(
+        max_review_cycles=2,
+        writer_plan_turns=3,
+        writer_attempt_turns=8,
+        reviewer_pass_turns=4,
+        test_ceiling="basic",
+    ),
+    DetailLevel.STANDARD: RunProfile(
+        max_review_cycles=3,
+        writer_plan_turns=4,
+        writer_attempt_turns=12,
+        reviewer_pass_turns=6,
+        test_ceiling="focused",
+    ),
+    DetailLevel.DEEP: RunProfile(
+        max_review_cycles=4,
+        writer_plan_turns=6,
+        writer_attempt_turns=18,
+        reviewer_pass_turns=9,
+        test_ceiling="full",
+    ),
 }
 
 # rigor order used to clamp a criterion's test_level down to the profile ceiling.

@@ -12,14 +12,14 @@ rolled back.
 
 - A general ReAct coding agent with local tools, SQLite memory/code index, MCP,
   and a FastAPI runtime.
-- One evidence-grounded improvement Orchestrator with isolated Triage,
-  Candidate Selection, and Contract Expansion stages.
+- One evidence-grounded improvement Orchestrator with isolated Workflow Analysis,
+  Target-Agent Analysis, Candidate Selection, and Contract Expansion stages.
 - Two governance modes: `autonomous` and `supervised`.
 - Recursive Runs with one branch/worktree for their full lifetime.
 - One commit per delivered Loop.
 - One coherent capability Task per Loop, with a validated single-node Task plan.
-- Typed, output-repairable Orchestrator, Reviewer, and Deliverer hand-offs;
-  Writer hands off its authoritative Git diff with only an optional text note.
+- Typed, output-repairable Orchestrator, Writer, Reviewer, and Deliverer hand-offs;
+  Writer status is structured while its authoritative implementation artifact is Git diff.
 - Two minimal hard-gate families: hand-off validity and delivery/commit safety.
 - Task-level code review and Loop-level runnable Delivery with frozen usage scenarios.
 - A demo-agent runtime adapter that normalizes real target tool calls into Delivery
@@ -30,7 +30,8 @@ rolled back.
 
 ```text
 User intent + target trajectory + current source
-    -> Orchestrator Triage audits current-run alerts and agent-level problems
+    -> Workflow Analysis audits AgentReforge's own prior Loop execution
+    -> Target-Agent Analysis audits current target alerts and capability problems
     -> Candidate Selection generates, scores, and compares interventions
     -> Contract Expansion expands only the frozen winner
     -> coordinator deterministically assembles the final ImprovementProposal
@@ -41,9 +42,10 @@ User intent + target trajectory + current source
     -> Writer implements the Task
     -> Reviewer returns typed blocking/non-blocking findings
     -> malformed hand-offs are rewritten by their producing output module
-    -> Deliverer actively invokes frozen run/scenario tools and watches the target agent
-    -> execution tools capture output, artifacts, environment facts, and trajectory
-    -> Deliverer assesses that actual evidence against the Loop goal
+    -> one structured Task/Observation Scenario passes Deliverer readiness review
+    -> Runner renders the task form, executes it with separate turn/action budgets,
+       and captures component inputs/outputs, artifacts, environment facts, and trajectory
+    -> Deliverer condenses per-Scenario evidence, then judges Loop goal realization
     -> only observed implementation defects may return to Writer for repair
     -> verification/plan/environment failures end the Loop and inform the next one
     -> reject repeated Candidate + verification strategies via the Negative-Attempt Ledger

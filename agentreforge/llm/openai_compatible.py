@@ -23,7 +23,10 @@ class OpenAICompatibleClient:
     model: str
     api_key: str
     base_url: str
-    max_tokens: int = 8192
+    # Reasoning models count hidden reasoning and visible JSON against the same
+    # completion budget. 8k can truncate otherwise compact typed handoffs before
+    # their closing delimiter; this is a ceiling, not a pre-allocated charge.
+    max_tokens: int = 16384
     temperature: float = 0.7
     timeout: float = 120.0
 

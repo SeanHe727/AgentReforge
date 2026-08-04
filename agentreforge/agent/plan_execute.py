@@ -9,14 +9,17 @@ per-task message.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 from ..llm.base import LlmClient
 from ..orchestration.task_executor import (
+    WORKER_HANDOFF_CONTRACT,
     ExecutorConfig,
     TaskExecutor,
     run_streamed,
+    worker_handoff_error,
 )
 from ..plan.models import ExecutionPlan, Task
 from ..plan.planner import Planner
@@ -49,9 +52,15 @@ async def plan_execute(
         model=client.model_name,
         provider=client.provider_name,
         tool_names=registry.list_names(),
-    ).build()
+    ).build() + "\n\nFINAL OUTPUT CONTRACT:\n" + WORKER_HANDOFF_CONTRACT
     executor = TaskExecutor(client=client, registry=registry)
-    config = ExecutorConfig(review=False, parallel=True, max_task_turns=max_task_turns)
+    config = ExecutorConfig(
+        review=False,
+        parallel=True,
+        max_task_turns=max_task_turns,
+        worker_output_validate=worker_handoff_error,
+        worker_output_contract=WORKER_HANDOFF_CONTRACT,
+    )
     async for event in run_streamed(
         executor,
         plan=plan,
@@ -70,16 +79,34 @@ async def plan_execute(
 
 
 def _task_message(plan: ExecutionPlan, task: Task) -> str:
-    # give the task its goal context plus the results of its dependencies.
-    lines = [f"Overall goal: {plan.goal}", f"Your task: {task.description}"]
-    if task.dependencies:
-        lines.append("\nResults from prerequisite tasks:")
-        for dep_id in task.dependencies:
-            dep = plan.get(dep_id)
-            if dep:
-                lines.append(f"- [{dep.id}] {dep.description}: {dep.result}")
-    lines.append("\nComplete this task concretely, using tools when needed.")
-    return "\n".join(lines)
+    # Give the task typed context; dependency results remain explicitly attributed.
+    prerequisites = []
+    for dep_id in task.dependencies:
+        dep = plan.get(dep_id)
+        if dep:
+            prerequisites.append(
+                {
+                    "task_id": dep.id,
+                    "description": dep.description,
+                    "status": dep.status.value,
+                    "result": dep.result,
+                }
+            )
+    return json.dumps(
+        {
+            "request_kind": "execute_plan_task",
+            "overall_goal": plan.goal,
+            "task": {
+                "id": task.id,
+                "description": task.description,
+                "dependencies": task.dependencies,
+            },
+            "prerequisite_results": prerequisites,
+            "instruction": "Complete this task concretely, using tools when needed.",
+            "output_contract": WORKER_HANDOFF_CONTRACT,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _final_summary(plan: ExecutionPlan) -> str:

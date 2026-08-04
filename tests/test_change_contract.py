@@ -13,6 +13,7 @@ from agentreforge.improve.models import (
     CandidateRankingEntry,
     ContractClause,
     ImprovementProposal,
+    ScenarioOutcomeCondition,
     SelectedChangeContract,
 )
 from agentreforge.improve.pipeline import PipelineResult, _analysis_problems, render_report
@@ -38,9 +39,14 @@ def _new_interface_proposal() -> ImprovementProposal:
         diagnosis=diagnosis,
         intervention=intervention,
         expected_outputs=[
-            ContractClause(
+            ScenarioOutcomeCondition(
                 id="OUT1",
                 description="The target can report a relevant nested source path.",
+                rationale="This demonstrates that recursive discovery is reachable.",
+                evidence_direction=(
+                    "A target-agent trajectory should contain the discovered nested path "
+                    "before the edit decision."
+                ),
             )
         ],
         invariants=[
@@ -195,6 +201,14 @@ def test_deliverer_receives_proposal_guardrails_and_only_selected_contract():
     assert "add and wire a workspace-confined recursive search tool" in message
     assert "unselected-planning" not in message
     assert "diff --git a/demo_agent/tools.py" in message
+
+
+def test_expected_output_explains_why_and_what_evidence_should_change():
+    proposal = _new_interface_proposal()
+    expected = proposal.selected_change_contract.expected_outputs[0]
+
+    assert expected.rationale
+    assert "trajectory" in expected.evidence_direction
 
 
 def test_scorecards_and_pairwise_review_are_recorded_for_human_inspection():

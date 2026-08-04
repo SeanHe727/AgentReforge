@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..llm.base import LlmClient
 from ..llm.collect import collect_text
@@ -32,6 +32,14 @@ class PlanSpec(BaseModel):
     tasks: list[TaskSpec]
 
 
+class PlannerRequest(BaseModel):
+    request_kind: str
+    goal: str
+    completed_tasks: list[dict[str, str]] = Field(default_factory=list)
+    failed_tasks: list[dict[str, str]] = Field(default_factory=list)
+    retry_instruction: str = ""
+
+
 class Planner:
     def __init__(self, client: LlmClient):
         self.client = client
@@ -40,7 +48,15 @@ class Planner:
         # send request to LLM to generate a plan (no tools, just JSON text back)
         text = await collect_text(
             self.client,
-            [Message(role="user", content=f"Create an execution plan for:\n{goal}")],
+            [
+                Message(
+                    role="user",
+                    content=PlannerRequest(
+                        request_kind="create_plan",
+                        goal=goal,
+                    ).model_dump_json(indent=2),
+                )
+            ],
             system_prompt=PLANNER_PROMPT,
         )
         return self._to_plan(goal, self._parse(text))
@@ -50,22 +66,37 @@ class Planner:
         completed = [t for t in failed_plan.tasks.values() if t.status is TaskStatus.COMPLETED]
         failed = [t for t in failed_plan.tasks.values() if t.status is TaskStatus.FAILED]
 
-        lines = [f"Original goal:\n{failed_plan.goal}", ""]
-        if completed:
-            lines.append("Already completed (do NOT redo these):")
-            lines += [f"- [{t.id}] {t.description}: {_preview(t.result)}" for t in completed]
-        if failed:
-            lines.append("\nFailed last time (rethink the approach):")
-            lines += [f"- [{t.id}] {t.description}: {_preview(t.result)}" for t in failed]
-        # reason = optional user instruction; if empty, ask the model to self-diagnose.
-        if reason.strip():
-            lines.append(f"\nUser instruction for this retry:\n{reason.strip()}")
-        else:
-            lines.append("\nAnalyze the failure and produce a revised plan for the remaining work.")
-
         text = await collect_text(
             self.client,
-            [Message(role="user", content="\n".join(lines))],
+            [
+                Message(
+                    role="user",
+                    content=PlannerRequest(
+                        request_kind="replan",
+                        goal=failed_plan.goal,
+                        completed_tasks=[
+                            {
+                                "id": task.id,
+                                "description": task.description,
+                                "result": _preview(task.result),
+                            }
+                            for task in completed
+                        ],
+                        failed_tasks=[
+                            {
+                                "id": task.id,
+                                "description": task.description,
+                                "result": _preview(task.result),
+                            }
+                            for task in failed
+                        ],
+                        retry_instruction=(
+                            reason.strip()
+                            or "Diagnose the failure and replan only the remaining work."
+                        ),
+                    ).model_dump_json(indent=2),
+                )
+            ],
             system_prompt=PLANNER_PROMPT,
         )
         return self._to_plan(failed_plan.goal, self._parse(text))

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,6 +118,8 @@ async def log_target_trajectory(
             "ts": datetime.now(UTC).isoformat(),
             "event_id": f"{session_id}:event:0",
             "trajectory_kind": "target_agent",
+            "actor": "target_agent",
+            "status": "started",
             "run_id": session_id,
             "session_id": session_id,
             "type": "target_run_started",
@@ -157,15 +160,34 @@ def _record(
     base = {
         "ts": datetime.now(UTC).isoformat(),
         "event_id": f"{session_id}:event:{event_index}",
+        "sequence": event_index,
         "trajectory_kind": "target_agent",
         "run_id": session_id,
         "session_id": session_id,
         "type": etype,
     }
+    if etype == "agent_turn":
+        return base | {
+            "actor": "target_agent",
+            "status": "completed",
+            "turn": int(event.get("turn") or 0),
+            "content": str(event.get("content") or "")[:_MAX_CONTENT],
+            "tool_calls": _safe_tool_calls(event.get("tool_calls")),
+        }
     if etype == "tool_result":
         content = str(event.get("content") or "")
         return base | {
+            "actor": "tool",
+            "status": (
+                "error"
+                if tool_result_is_error(
+                    content,
+                    declared=bool(event.get("is_error")),
+                )
+                else "completed"
+            ),
             "name": event.get("name"),
+            "tool_call_id": str(event.get("tool_call_id") or ""),
             "arguments": _safe_arguments(event.get("arguments")),
             "is_error": tool_result_is_error(
                 content,
@@ -174,16 +196,26 @@ def _record(
             "content": content[:_MAX_CONTENT],
         }
     if etype == "usage":
-        return base | {"usage": event.get("usage")}
+        return base | {
+            "actor": "llm",
+            "status": "completed",
+            "usage": event.get("usage"),
+        }
     if etype == "done":
         return base | {
+            "actor": "target_agent",
+            "status": "completed",
             "turns": event.get("turns"),
             "total_tokens": event.get("total_tokens"),
             "outcome": "completed",
             "final_response": _final_response(event)[:_MAX_CONTENT],
         }
     if etype == "error":
-        return base | {"error": str(event.get("error"))}
+        return base | {
+            "actor": "target_agent",
+            "status": "error",
+            "error": str(event.get("error")),
+        }
     return None  # skip text_delta and anything without evidence value
 
 
@@ -197,6 +229,33 @@ def _safe_arguments(value: Any) -> dict[str, Any]:
             continue
         text = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
         safe[str(key)] = text[:_MAX_ARGUMENT]
+    return safe
+
+
+def _safe_tool_calls(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") or {}
+        if not isinstance(function, dict):
+            function = {}
+        raw = function.get("arguments") or "{}"
+        try:
+            arguments = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            arguments = {"_raw": str(raw)}
+        safe.append(
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(function.get("name") or ""),
+                "arguments": _safe_arguments(
+                    arguments if isinstance(arguments, dict) else {"_value": arguments}
+                ),
+            }
+        )
     return safe
 
 
@@ -252,18 +311,55 @@ def list_trajectories(cwd: str, store_root: str | Path | None = None) -> list[st
 def load_recent_trajectory(
     cwd: str, *, sessions: int = 4, max_records: int = 200, store_root: str | Path | None = None
 ) -> list[dict[str, Any]]:
-    """Aggregate the evidence events from the most recent `sessions` runs.
+    """Aggregate evidence, prioritizing runs from the target's current commit.
 
-    This is what the Analyzer gets grounded on: 'how the agent recently behaved',
-    newest sessions first, capped so a long history can't flood the prompt.
+    Delivery runs from newer timestamps may belong to abandoned improvement
+    branches. They must not displace older baseline runs that actually describe
+    the checked-out target version.
     """
-    # newest sessions first, then their events oldest-to-newest within each.
+    newest = list_trajectories(cwd, store_root)
+    records_by_session = {
+        session_id: load_trajectory(cwd, session_id, store_root)
+        for session_id in newest
+    }
+    current_commit = _current_git_commit(cwd)
+    current_sessions = [
+        session_id
+        for session_id in newest
+        if current_commit
+        and any(
+            _same_commit(str(record.get("target_commit") or ""), current_commit)
+            for record in records_by_session[session_id]
+        )
+    ]
+    ordered = current_sessions + [
+        session_id for session_id in newest if session_id not in current_sessions
+    ]
+
     out: list[dict[str, Any]] = []
-    for session_id in list_trajectories(cwd, store_root)[:sessions]:
-        out.extend(load_trajectory(cwd, session_id, store_root))
+    for session_id in ordered[:sessions]:
+        out.extend(records_by_session[session_id])
         if len(out) >= max_records:
             break
     return out[:max_records]
+
+
+def _current_git_commit(cwd: str | Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _same_commit(left: str, right: str) -> bool:
+    return bool(left and right) and (left.startswith(right) or right.startswith(left))
 
 
 # Explicit names for new call sites. Legacy names remain available for callers.

@@ -3,7 +3,13 @@ from __future__ import annotations
 from conftest import make_proposal
 
 from agentreforge.improve.acceptance import validate_acceptance
-from agentreforge.improve.models import DeliveryScenario, ExecutableCondition
+from agentreforge.improve.models import (
+    ContractClause,
+    DeliveryScenario,
+    ExecutableCondition,
+    ScenarioObservation,
+    ScenarioTaskContract,
+)
 
 
 def test_minimal_delivery_contract_is_valid():
@@ -71,6 +77,37 @@ def test_frozen_scenario_can_replace_generic_smoke_command():
     assert validate_acceptance(proposal).valid
 
 
+def test_scenario_uses_a_structured_task_and_observation_contract():
+    scenario = DeliveryScenario(
+        id="structured",
+        task_contract=ScenarioTaskContract(
+            objective="Add a health endpoint.",
+            context=["The fixture is a small Python service."],
+            requirements=[ContractClause(id="R1", description="Return status ok.")],
+            acceptance_checks=[
+                ContractClause(id="A1", description="Run python3 -m pytest.")
+            ],
+        ),
+        command=["agent", "{prompt}", "--dir", "{workspace}"],
+        observations=[
+            ScenarioObservation(
+                id="O1",
+                component="tool loop",
+                expected_behavior="Run the representative test after editing.",
+                evidence_sources=["tool_call", "tool_result"],
+            )
+        ],
+        requires_trajectory=True,
+    )
+
+    rendered = scenario.render_prompt()
+
+    assert "Objective:\nAdd a health endpoint." in rendered
+    assert "[R1] Return status ok." in rendered
+    assert "[A1] Run python3 -m pytest." in rendered
+    assert "prompt" not in scenario.model_dump()
+
+
 def test_scenario_placeholders_are_optional_but_fixture_paths_stay_confined():
     proposal = make_proposal(
         delivery_run=[],
@@ -88,6 +125,26 @@ def test_scenario_placeholders_are_optional_but_fixture_paths_stay_confined():
 
     assert not result.valid
     assert "unsafe fixture path" in result.summary()
+
+
+def test_acceptance_allows_only_one_primary_scenario_per_loop():
+    scenario = DeliveryScenario(
+        id="one",
+        prompt="run one task",
+        command=["agent", "{prompt}"],
+    )
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            scenario,
+            scenario.model_copy(update={"id": "two"}),
+        ],
+    )
+
+    result = validate_acceptance(proposal)
+
+    assert not result.valid
+    assert "at most one primary delivery scenario" in result.summary()
 
 
 def test_scenario_environment_contract_rejects_only_conflicting_facts():

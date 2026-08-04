@@ -1,17 +1,28 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from ..llm.base import LlmClient
 from ..llm.collect import collect_text
+from ..llm.parse import parse_json_model
 from ..orchestration.handoff import repair_handoff_output
 from ..types import Message
 
 REVIEWER_PROMPT = """You are a strict reviewer on an agent team.
 Given a task and a worker's result, decide if the result correctly and fully
 satisfies the task.
-Reply on the FIRST line with exactly APPROVED or REJECTED.
-If REJECTED, add a second line with concrete, actionable feedback for a retry."""
+Return ONLY one JSON object:
+{"verdict": "approve|reject", "feedback": [str], "summary": str}"""
+
+
+class ReviewerDecision(BaseModel):
+    verdict: Literal["approve", "reject"]
+    feedback: list[str] = Field(default_factory=list)
+    summary: str = ""
 
 
 @dataclass
@@ -19,6 +30,7 @@ class Review:
     approved: bool
     feedback: str = ""
     handoff_failed: bool = False
+    structured_findings: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Reviewer:
@@ -29,7 +41,19 @@ class Reviewer:
         # ask the LLM to judge the result against the task (no tools), get text
         text = await collect_text(
             self.client,
-            [Message(role="user", content=f"Task:\n{task}\n\nWorker result:\n{result}")],
+            [
+                Message(
+                    role="user",
+                    content=json.dumps(
+                        {
+                            "request_kind": "review",
+                            "task": _json_value(task),
+                            "worker_result": _json_value(result),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            ],
             system_prompt=REVIEWER_PROMPT,
         )
         output_error = _review_output_error(text)
@@ -40,10 +64,17 @@ class Reviewer:
                 invalid_output=text,
                 validation_error=output_error,
                 contract=(
-                    "First line exactly APPROVED or REJECTED. "
-                    "REJECTED must include concrete feedback."
+                    "One ReviewerDecision JSON object with verdict approve|reject, "
+                    "feedback:list[str], and summary:string."
                 ),
-                context=f"Task:\n{task}\n\nWorker result:\n{result}",
+                context=json.dumps(
+                    {
+                        "request_kind": "review",
+                        "task": _json_value(task),
+                        "worker_result": _json_value(result),
+                    },
+                    ensure_ascii=False,
+                ),
                 validate=_review_output_error,
             )
             if repaired.error:
@@ -56,25 +87,30 @@ class Reviewer:
         return self._parse(text)
 
     def _parse(self, text: str) -> Review:
-        # parse the verdict text into a Review. Conservative: only an explicit
-        # APPROVED (without REJECTED) approves; anything else is a rejection.
-        cleaned = (text or "").strip()
-        upper = cleaned.upper()
-        approved = "APPROVED" in upper and "REJECTED" not in upper
-        if approved:
+        output = parse_json_model(text, ReviewerDecision)
+        if output.verdict == "approve":
             return Review(approved=True)
-        lines = cleaned.splitlines()
-        feedback = "\n".join(lines[1:]).strip() or cleaned or "Rejected without specific feedback."
-        return Review(approved=False, feedback=feedback)
+        feedback = "\n".join(output.feedback).strip() or output.summary
+        return Review(
+            approved=False,
+            feedback=feedback or "Rejected without specific feedback.",
+        )
 
 
 def _review_output_error(text: str) -> str:
-    lines = (text or "").strip().splitlines()
-    if not lines:
-        return "Reviewer output is empty"
-    verdict = lines[0].strip().upper()
-    if verdict not in {"APPROVED", "REJECTED"}:
-        return "first line must be exactly APPROVED or REJECTED"
-    if verdict == "REJECTED" and not "\n".join(lines[1:]).strip():
-        return "REJECTED requires concrete feedback"
+    try:
+        output = parse_json_model(text, ReviewerDecision)
+    except ValueError as exc:
+        return str(exc)
+    if output.verdict == "reject" and not (output.feedback or output.summary.strip()):
+        return "reject requires concrete feedback"
     return ""
+
+
+def _json_value(value: str) -> Any:
+    """Keep nested handoffs as objects; preserve genuine prose as an attributed field."""
+
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {"unstructured_context": value}

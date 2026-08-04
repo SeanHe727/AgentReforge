@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 
 from conftest import make_proposal
@@ -17,7 +16,9 @@ from agentreforge.improve.acceptance_runner import (
 from agentreforge.improve.deliverer import (
     Deliverer,
     GoalReview,
+    _command_hard_failure,
     _delivery_review_output_error,
+    _scenario_hard_failure,
     goal_review_message,
 )
 from agentreforge.improve.delivery_coordinator import DeliveryCoordinator
@@ -63,6 +64,21 @@ def test_delivery_command_denylist_blocks_destructive_git():
     assert dangerous_command("python -m pytest tests") is None
 
 
+def test_decisive_execution_failures_veto_without_proving_success():
+    assert _command_hard_failure(RunResult("not-a-command", 127, "not found"))
+    assert _command_hard_failure(RunResult("python3 -m pytest", 0, "passed")) == ""
+    assert _scenario_hard_failure(
+        ScenarioRunResult(
+            scenario_id="bounded-run",
+            prompt="complete the task",
+            command=["agent"],
+            exit_code=0,
+            output="(stopped: reached max steps)",
+            trajectory=[{"type": "done", "outcome": "incomplete"}],
+        )
+    )
+
+
 def test_runner_executes_frozen_prompt_in_isolated_fixture_and_collects_evidence(
     tmp_path,
 ):
@@ -103,9 +119,40 @@ def test_runner_executes_frozen_prompt_in_isolated_fixture_and_collects_evidence
     scenario = result.scenario_runs[0]
     assert scenario.output.strip() == "scenario complete"
     assert scenario.changed_files == ["result.txt"]
-    assert scenario.artifacts["result.txt"] == "find the model client"
+    assert scenario.artifacts["result.txt"].startswith(
+        "Objective:\nfind the model client\n\nPrimary success conditions:"
+    )
     assert scenario.trajectory_available
     assert scenario.trajectory[0]["name"] == "search_code"
+
+
+def test_target_trajectory_is_private_from_the_task_workspace(tmp_path):
+    script = (
+        "import os, sys; "
+        "from pathlib import Path; "
+        "workspace=Path(sys.argv[1]).resolve(); "
+        "trajectory=Path(os.environ['AGENTREFORGE_TRAJECTORY_PATH']).resolve(); "
+        "assert workspace not in trajectory.parents; "
+        "assert not (workspace/'.agentreforge_trajectory.jsonl').exists(); "
+        "trajectory.write_text('{\"type\":\"done\",\"outcome\":\"completed\"}\\n'); "
+        "print('trajectory private')"
+    )
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="private-trajectory",
+                prompt="inspect the task workspace",
+                command=["python3", "-c", script, "{workspace}"],
+            )
+        ],
+    )
+
+    result = asyncio.run(AcceptanceRunner(timeout_s=10).run(proposal, cwd=str(tmp_path)))
+
+    assert result.passed
+    assert result.scenario_runs[0].output.strip() == "trajectory private"
+    assert result.scenario_runs[0].changed_files == []
 
 
 def test_runner_materializes_and_records_executable_conditions(tmp_path, monkeypatch):
@@ -268,6 +315,106 @@ def test_demo_agent_adapter_collects_real_tool_trajectory(tmp_path):
     ]
     assert scenario.trajectory[-2]["is_error"] is True
     assert scenario.trajectory_available
+
+
+def test_demo_adapter_separates_free_reads_from_bounded_actions(tmp_path):
+    package = tmp_path / "demo_agent"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "agent.py").write_text(
+        "from pathlib import Path\n"
+        "def execute(name, args, cwd):\n"
+        "    root = Path(cwd)\n"
+        "    if name == 'read_file': return (root / args['path']).read_text()\n"
+        "    if name == 'write_file':\n"
+        "        (root / args['path']).write_text(args['content']); return 'wrote'\n"
+        "def run_task(prompt, cwd, max_steps=8):\n"
+        "    for _ in range(10): execute('read_file', {'path': 'seed.txt'}, cwd)\n"
+        "    for i in range(9):\n"
+        "        execute('write_file', {'path': f'out-{i}.txt', 'content': 'x'}, cwd)\n"
+        "    return 'done'\n",
+        encoding="utf-8",
+    )
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="budgeted",
+                prompt="inspect and edit",
+                command=["python3", "-m", "demo_agent", "{prompt}"],
+                fixture_files={"seed.txt": "seed"},
+            )
+        ],
+    )
+
+    result = asyncio.run(AcceptanceRunner(timeout_s=10).run(proposal, cwd=str(tmp_path)))
+    scenario = result.scenario_runs[0]
+
+    assert len([item for item in scenario.trajectory if item.get("name") == "read_file"]) == 10
+    assert len([item for item in scenario.trajectory if item.get("action_step")]) == 8
+    assert any(item.get("budget_blocked") for item in scenario.trajectory)
+    assert scenario.changed_files == [f"out-{index}.txt" for index in range(8)]
+
+
+def test_demo_adapter_records_model_component_inputs_and_outputs(tmp_path):
+    package = tmp_path / "demo_agent"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "agent.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "def chat(messages, tools=None):\n"
+        "    if not any(item.get('role') == 'tool' for item in messages):\n"
+        "        return {'role': 'assistant', 'content': '', 'tool_calls': [{\n"
+        "            'id': 'call-1', 'function': {'name': 'write_file',\n"
+        "            'arguments': json.dumps({'path': 'result.txt', 'content': 'ok'})}}]}\n"
+        "    return {'role': 'assistant', 'content': 'verified', 'tool_calls': []}\n"
+        "def execute(name, args, cwd):\n"
+        "    (Path(cwd) / args['path']).write_text(args['content']); return 'wrote'\n"
+        "def run_task(prompt, cwd, max_steps=8):\n"
+        "    messages = [{'role': 'system', 'content': 'system'},\n"
+        "                {'role': 'user', 'content': prompt}]\n"
+        "    for _ in range(max_steps):\n"
+        "        message = chat(messages, tools=[]); messages.append(message)\n"
+        "        calls = message.get('tool_calls') or []\n"
+        "        if not calls: return message['content']\n"
+        "        for call in calls:\n"
+        "            fn = call['function']; args = json.loads(fn['arguments'])\n"
+        "            result = execute(fn['name'], args, cwd)\n"
+        "            messages.append({'role': 'tool', 'tool_call_id': call['id'],\n"
+        "                             'content': result})\n"
+        "    return '(stopped: reached max steps)'\n",
+        encoding="utf-8",
+    )
+    proposal = make_proposal(
+        delivery_run=[],
+        delivery_scenarios=[
+            DeliveryScenario(
+                id="component-io",
+                prompt="write the result",
+                command=["python3", "-m", "demo_agent", "{prompt}"],
+                requires_trajectory=True,
+            )
+        ],
+    )
+
+    result = asyncio.run(AcceptanceRunner(timeout_s=10).run(proposal, cwd=str(tmp_path)))
+    turns = [
+        item
+        for item in result.scenario_runs[0].trajectory
+        if item.get("type") == "agent_turn"
+    ]
+
+    assert [item["turn"] for item in turns] == [1, 2]
+    assert [message["role"] for message in turns[0]["input_messages"]] == [
+        "system",
+        "user",
+    ]
+    assert [message["role"] for message in turns[1]["input_messages"]] == [
+        "assistant",
+        "tool",
+    ]
+    assert turns[1]["content"] == "verified"
 
 
 def test_demo_agent_adapter_runs_deterministic_path_confinement_probe(tmp_path):
@@ -578,20 +725,31 @@ def test_agentic_deliverer_chooses_and_runs_a_frozen_scenario(tmp_path):
         async def chat(self, messages, tools=None, *, system_prompt):
             self.calls += 1
             if self.calls == 1:
-                assert any(
-                    tool["function"]["name"] == "run_delivery_scenario"
-                    for tool in tools
-                )
                 yield {
-                    "type": "tool_call_delta",
-                    "tool_call": {
-                        "index": 0,
-                        "id": "scenario_call",
-                        "function": {
-                            "name": "run_delivery_scenario",
-                            "arguments": json.dumps({"scenario_id": "actual-run"}),
-                        },
-                    },
+                    "type": "text_delta",
+                    "text": (
+                        '{"ready": true, "missing_requirements": [], '
+                        '"execution_focus": ["observe the target"], '
+                        '"summary": "scenario is ready"}'
+                    ),
+                }
+                return
+            if self.calls == 2:
+                yield {
+                    "type": "text_delta",
+                    "text": (
+                        '{"scenario_id": "actual-run", '
+                        '"observed_facts": ["process printed observed target"], '
+                        '"trajectory_findings": [], "artifact_findings": [], '
+                        '"baseline_consistent": false, "candidate_consistent": true, '
+                        '"discriminating_evidence": ["observed target"], '
+                        '"outcome_assessments": [{"condition_id": "legacy-primary", '
+                        '"category": "primary_success", "status": "supported", '
+                        '"evidence": ["observed target"], '
+                        '"explanation": "the target path ran"}], '
+                        '"confounders": [], "sufficient": true, '
+                        '"summary": "scenario produced usable evidence"}'
+                    ),
                 }
                 return
             yield {
@@ -601,7 +759,7 @@ def test_agentic_deliverer_chooses_and_runs_a_frozen_scenario(tmp_path):
                     '"missing_objectives": [], "integration_concerns": [], '
                     '"proposal_violations": [], "blocking_evidence": [], '
                     '"summary": "observed the frozen target path"}'
-                ),
+                )
             }
 
     proposal = make_proposal(
@@ -629,7 +787,7 @@ def test_agentic_deliverer_chooses_and_runs_a_frozen_scenario(tmp_path):
 
     assert result.passed
     assert result.goal_accepted
-    assert client.calls == 2
+    assert client.calls == 3
     assert result.scenario_runs[0].scenario_id == "actual-run"
     assert result.scenario_runs[0].output.strip() == "observed target"
 

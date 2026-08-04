@@ -77,6 +77,15 @@ async def query(
 
         # record this assistant turn (with any proposed tool calls) into history
         messages.append(Message(role="assistant", content=text, tool_calls=tool_calls))
+        # Emit one complete assistant action after streamed fragments have been
+        # assembled. Target-trajectory logging persists this event; UI consumers
+        # may ignore it and continue rendering text_delta as before.
+        yield {
+            "type": "agent_turn",
+            "turn": turn,
+            "content": text,
+            "tool_calls": tool_calls,
+        }
 
         # no tool calls -> the model gave its final answer
         if not tool_calls:
@@ -89,6 +98,7 @@ async def query(
             yield {
                 "type": "tool_result",
                 "name": _name_by_id(tool_calls, result.tool_use_id or ""),
+                "tool_call_id": result.tool_use_id or "",
                 # Observable tool intent belongs in target-agent trajectories.
                 # The trajectory logger applies size limits/redaction before storage.
                 "arguments": _arguments(call),

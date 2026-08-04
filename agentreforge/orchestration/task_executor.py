@@ -11,14 +11,20 @@ message-building callbacks — nothing else is duplicated.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+
+from pydantic import BaseModel, Field
 
 from ..agent.query import query
 from ..improve.models import ExecutionBlocker, Finding, ReviewResult
+from ..llm.parse import parse_json_model
+from ..orchestration.handoff import finalize_handoff_output, repair_handoff_output
 from ..plan.models import ExecutionPlan, Task
 from ..tools.base import Tool, ToolResult, object_schema
 from ..tools.registry import ToolRegistry
@@ -56,6 +62,40 @@ TaskBrief = Callable[[Task], str]
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+class WorkerHandoff(BaseModel):
+    """Small, generic execution result shared by non-improvement Workers."""
+
+    status: Literal["completed", "blocked"]
+    summary: str
+    blocking_reasons: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+
+
+WORKER_HANDOFF_CONTRACT = (
+    "One WorkerHandoff JSON object: "
+    '{"status":"completed|blocked","summary":str,'
+    '"blocking_reasons":[str],"evidence":[str]}. '
+    "Use status=blocked when the task could not be completed and explain why. "
+    "Evidence should point to concrete files, tool results, or checks."
+)
+
+
+def worker_handoff_error(text: str) -> str:
+    """Validate the generic Worker output without interpreting free-text keywords."""
+
+    try:
+        output = parse_json_model(text, WorkerHandoff)
+    except ValueError as exc:
+        return str(exc)
+    if not output.summary.strip():
+        return "summary must explain the outcome"
+    if output.status == "completed" and output.blocking_reasons:
+        return "completed status contradicts non-empty blocking_reasons"
+    if output.status == "blocked" and not output.blocking_reasons:
+        return "blocked status requires at least one blocking_reasons entry"
+    return ""
+
+
 @dataclass
 class ExecutorConfig:
     max_rounds: int = 1  # worker<->reviewer rounds per task (1 = single shot)
@@ -68,6 +108,8 @@ class ExecutorConfig:
     # give the worker a request_review tool so the Writer pushes each increment itself.
     writer_driven_review: bool = False
     max_handoff_retries: int = 2
+    worker_output_validate: Callable[[str], str] | None = None
+    worker_output_contract: str = ""
 
 
 @dataclass
@@ -190,13 +232,106 @@ class TaskExecutor:
                 build_task_message(task, plan, feedback), cwd, system_prompt,
                 config.max_task_turns, memory, code_index, registry=worker_registry,
             )
-            attempts.append(worker_text or err or "(no output)")
-
             # a worker error is treated like a rejected round: retry or block.
             if err is not None:
+                attempts.append(worker_text or err or "(no output)")
                 last_review = _revise(task.id, f"worker error: {err}")
                 await _emit(event_sink, _reject_event(task.id, round_i, err))
                 continue
+            if config.worker_output_validate is not None:
+                handoff_error = config.worker_output_validate(worker_text)
+                if handoff_error:
+                    authoritative_diff = ""
+                    if config.worktree is not None and task_start is not None:
+                        authoritative_diff = await config.worktree.diff_since(task_start)
+                    # ReAct work turns and component handoff turns are separate
+                    # budgets. Even when the final work turn used a tool, run one
+                    # mandatory tool-free output turn.
+                    worker_text = await finalize_handoff_output(
+                        self.client,
+                        producer="Writer",
+                        contract=config.worker_output_contract,
+                        context={
+                            "task_id": task.id,
+                            "task_brief": brief,
+                            "worker_execution_output": worker_text,
+                            "authoritative_task_diff": authoritative_diff[:16_000],
+                            "diff_is_implementation_evidence": True,
+                        },
+                    )
+                    handoff_error = config.worker_output_validate(worker_text)
+                if handoff_error:
+                    repaired = await repair_handoff_output(
+                        self.client,
+                        producer="Writer",
+                        invalid_output=worker_text,
+                        validation_error=handoff_error,
+                        contract=config.worker_output_contract,
+                        context=json.dumps(
+                            {
+                                "task_id": task.id,
+                                "task_brief": brief,
+                                "authoritative_task_diff": (
+                                    await config.worktree.diff_since(task_start)
+                                    if config.worktree is not None
+                                    and task_start is not None
+                                    else ""
+                                )[:16_000],
+                                "candidate_diff_is_authoritative": True,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        validate=config.worker_output_validate,
+                    )
+                    if repaired.error:
+                        attempts.append(worker_text or "(invalid handoff)")
+                        failure = f"Writer hand-off failed: {repaired.error}"
+                        last_review = ReviewResult(
+                            verdict="escalate",
+                            findings=[
+                                Finding(
+                                    severity="major",
+                                    location=task.id,
+                                    description=failure,
+                                    required_fix=(
+                                        "Repair the Writer output interface; do not "
+                                        "change candidate code."
+                                    ),
+                                )
+                            ],
+                            summary=failure,
+                        )
+                        return TaskResult(
+                            task.id,
+                            "blocked",
+                            round_i,
+                            worker_text,
+                            last_review,
+                            None,
+                            attempts,
+                        )
+                    worker_text = repaired.text
+                # Status is a typed control field. Never infer completion from the
+                # human-readable summary, and do not send an explicit blocker to
+                # Reviewer as though it were a completed implementation.
+                structured = parse_json_model(worker_text, WorkerHandoff)
+                if structured.status == "blocked":
+                    attempts.append(worker_text)
+                    reason = "; ".join(structured.blocking_reasons)
+                    last_review = _revise(
+                        task.id,
+                        f"Writer reported a task blocker: {reason}",
+                    )
+                    return TaskResult(
+                        task.id,
+                        "blocked",
+                        round_i,
+                        worker_text,
+                        last_review,
+                        None,
+                        attempts,
+                    )
+            attempts.append(worker_text or "(no output)")
 
             # no review configured -> accept the single shot.
             if not config.review:
@@ -205,7 +340,12 @@ class TaskExecutor:
             # end-of-round gate: the SAME structural-guard + Reviewer check the worker can
             # invoke inline via request_review, now enforced on the round's final state.
             verdict = await self._run_review(
-                config, task_start, brief, worker_text, location=task.id
+                config,
+                task_start,
+                brief,
+                worker_text,
+                location=task.id,
+                prior_review=feedback,
             )
             last_review = verdict
             if verdict.verdict == "accept":
@@ -246,6 +386,7 @@ class TaskExecutor:
         body_text: str,
         *,
         location: str = "review",
+        prior_review: ReviewResult | None = None,
     ) -> ReviewResult:
         """Structural guard + Reviewer on THIS task's increment (shared by the round
         gate and the Writer's inline request_review tool)."""
@@ -260,16 +401,31 @@ class TaskExecutor:
             if findings:
                 return ReviewResult(verdict="revise", findings=findings,
                                     summary="Structural guard rejected the edit.")
-        # The task-scoped Git diff is the authoritative Writer hand-off. The final
-        # Writer text is optional context and never needs a schema.
+        # The task-scoped Git diff is authoritative implementation evidence. The
+        # structured Writer handoff explains status but cannot prove the code.
         note = body_text.strip()
-        review_parts: list[str] = []
-        if note and note != "(no output)":
-            review_parts.append(f"Optional Writer note (not evidence):\n{note}")
+        writer_handoff: Any = note
+        if note:
+            with suppress(json.JSONDecodeError):
+                writer_handoff = json.loads(note)
+        task_diff = ""
         if config.worktree is not None and task_start is not None:
-            diff = await config.worktree.diff_since(task_start)
-            review_parts.append(f"Authoritative Git diff (this task only):\n{diff}")
-        review_input = "\n\n".join(review_parts) or "Authoritative Git diff: (empty)"
+            task_diff = await config.worktree.diff_since(task_start)
+        review_input = json.dumps(
+            {
+                "handoff_kind": "writer_to_reviewer",
+                "writer_handoff": writer_handoff,
+                "prior_review": (
+                    prior_review.model_dump(mode="json")
+                    if prior_review is not None
+                    else None
+                ),
+                "authoritative_task_diff": task_diff,
+                "diff_is_implementation_evidence": True,
+                "writer_handoff_is_evidence": False,
+            },
+            ensure_ascii=False,
+        )
         review_tree = (
             await config.worktree.snapshot()
             if config.worktree is not None
@@ -321,8 +477,8 @@ class TaskExecutor:
             description=(
                 "Ask the Reviewer to review the increment you JUST implemented. Call this "
                 "after finishing a small, coherent part (e.g. one file or function). It "
-                "returns APPROVED or concrete changes to make. You must obtain an APPROVED "
-                "covering your final state before you finish."
+                "returns a structured ReviewResult JSON object. You must obtain a verdict "
+                "of accept covering your final state before you finish."
             ),
             parameters=object_schema(
                 {"summary": {"type": "string",
@@ -420,6 +576,22 @@ class TaskExecutor:
                 verdict="accept",
                 summary=getattr(review, "feedback", "") or "Reviewer approved the change.",
             )
+        structured = getattr(review, "structured_findings", None) or []
+        if structured:
+            findings = []
+            for index, item in enumerate(structured, start=1):
+                finding = Finding.model_validate(item)
+                findings.append(
+                    finding.model_copy(update={"id": finding.id or f"F{index}"})
+                )
+            return ReviewResult(
+                verdict="revise",
+                findings=findings,
+                summary=(
+                    getattr(review, "feedback", "")
+                    or "Reviewer requested targeted revisions."
+                ),
+            )
         raw = getattr(review, "feedback", "") or "Rejected without specific feedback."
         return _revise(location, raw.strip())
 
@@ -467,14 +639,9 @@ def _outside_declared_scope(changed: list[str], scopes: list[str]) -> list[str]:
 
 
 def _render_verdict(verdict: ReviewResult) -> str:
-    """Turn a review verdict into the text the Writer reads from request_review."""
-    if verdict.verdict == "accept":
-        return "APPROVED — the increment looks good. Continue with the next part, or finish."
-    if verdict.findings:
-        lines = ["CHANGES REQUESTED — fix these before finishing:"]
-        lines += [f"- [{f.severity}] {f.location}: {f.description}" for f in verdict.findings]
-        return "\n".join(lines)
-    return f"CHANGES REQUESTED: {verdict.summary}"
+    """Return one structured Reviewer-to-Writer tool result."""
+
+    return json.dumps(verdict.model_dump(mode="json"), ensure_ascii=False)
 
 
 def _revise(location: str, feedback: str) -> ReviewResult:

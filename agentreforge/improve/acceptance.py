@@ -58,9 +58,14 @@ def validate_acceptance(proposal: ImprovementProposal) -> AcceptanceValidation:
     scenario_ids = [scenario.id for scenario in delivery_scenarios]
     if len(scenario_ids) != len(set(scenario_ids)):
         errors.append("delivery scenario ids must be unique")
+    if len(delivery_scenarios) > 1:
+        errors.append(
+            "one Loop may contain at most one primary delivery scenario; "
+            "put multiple inputs/checks inside that scenario"
+        )
     for scenario in delivery_scenarios:
-        if not scenario.prompt.strip():
-            errors.append(f"delivery scenario {scenario.id!r} requires a prompt")
+        if not scenario.task_contract.objective.strip():
+            errors.append(f"delivery scenario {scenario.id!r} requires a task objective")
         if not scenario.command:
             errors.append(f"delivery scenario {scenario.id!r} requires an argv command")
         elif not scenario.command[0].strip():

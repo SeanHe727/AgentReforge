@@ -381,10 +381,30 @@ class ImprovementPipeline:
             )
         except ValueError as exc:
             partial_artifacts = {}
+            if orch.last_workflow_diagnosis is not None:
+                partial_artifacts["workflow_diagnosis"] = (
+                    orch.last_workflow_diagnosis.model_dump(mode="json")
+                )
+            if orch.last_case_analysis is not None:
+                partial_artifacts["case_analysis"] = (
+                    orch.last_case_analysis.model_dump(mode="json")
+                )
             if orch.last_diagnosis is not None:
                 partial_artifacts["diagnosis"] = orch.last_diagnosis.model_dump(mode="json")
             if orch.last_selection is not None:
                 partial_artifacts["selection"] = orch.last_selection.model_dump(mode="json")
+            if orch.last_contract_expansion is not None:
+                partial_artifacts["contract_expansion"] = (
+                    orch.last_contract_expansion.model_dump(mode="json")
+                )
+            if orch.last_case_definition is not None:
+                partial_artifacts["case_definition"] = (
+                    orch.last_case_definition.model_dump(mode="json")
+                )
+            if orch.last_delivery_execution is not None:
+                partial_artifacts["delivery_execution"] = (
+                    orch.last_delivery_execution.model_dump(mode="json")
+                )
             return PipelineResult(
                 stage="failed",
                 loop=loop_i,
@@ -414,8 +434,10 @@ class ImprovementPipeline:
         writer = WriterReviewer(
             client=self.client,
             registry=self.registry,
-            max_rounds=self.profile.max_rounds,
-            max_task_turns=self.profile.max_task_turns,
+            max_review_cycles=self.profile.max_review_cycles,
+            writer_plan_turns=self.profile.writer_plan_turns,
+            writer_attempt_turns=self.profile.writer_attempt_turns,
+            reviewer_pass_turns=self.profile.reviewer_pass_turns,
         )
 
         # 5. Only a COMPLETE, non-blocked implementation may reach the Deliverer.
@@ -942,6 +964,7 @@ def _materialize_loop_record(
                     "rounds": task.rounds,
                     "phase": task.phase,
                     "repair_iteration": task.repair_iteration,
+                    "writer_plan": task.writer_plan,
                     "writer_summary": task.writer_summary,
                     "attempts": task.attempts,
                     "commit": task.commit,
@@ -1185,6 +1208,8 @@ def _delivered_target_trajectory(
             {
                 "event_id": f"{target_run_id}:event:0",
                 "trajectory_kind": "target_agent",
+                "actor": "target_agent",
+                "status": "started",
                 "evidence_source": "delivered_scenario",
                 "target_commit": commit,
                 "run_id": target_run_id,
@@ -1218,6 +1243,8 @@ def _delivered_target_trajectory(
                         f"{target_run_id}:event:{len(scenario.trajectory) + 1}"
                     ),
                     "trajectory_kind": "target_agent",
+                    "actor": "target_agent",
+                    "status": "completed",
                     "evidence_source": "delivered_scenario",
                     "target_commit": commit,
                     "run_id": target_run_id,
@@ -1477,11 +1504,51 @@ def render_report(result: PipelineResult) -> str:
     if result.merged_commit:
         lines.append(f"- **Merged:** {result.merged_commit[:12]}")
 
+    if (
+        p
+        and p.orchestrator_artifacts
+        and p.orchestrator_artifacts.workflow_diagnosis
+    ):
+        workflow = p.orchestrator_artifacts.workflow_diagnosis
+        lines += [
+            "",
+            "## Orchestrator workflow analysis",
+            "",
+            workflow.whole_picture_summary or "(no workflow summary)",
+        ]
+        for assessment in workflow.loop_assessments:
+            lines.append(
+                f"- `{assessment.loop_id}` → **{assessment.classification}** — "
+                f"{assessment.explanation}"
+            )
+
+    if (
+        p
+        and p.orchestrator_artifacts
+        and p.orchestrator_artifacts.case_analysis
+    ):
+        lines += ["", "## Orchestrator case analysis", ""]
+        for run_id, case in p.orchestrator_artifacts.case_analysis.cases.items():
+            lines.append(
+                f"- `{run_id}` → **{case.final_status}** — {case.final_outcome} "
+                f"(layer: `{case.causal_analysis.failure_layer}`)"
+            )
+    elif result.orchestrator_artifacts.get("case_analysis"):
+        cases = result.orchestrator_artifacts["case_analysis"].get("cases") or {}
+        lines += ["", "## Partial Orchestrator case analysis", ""]
+        for run_id, case in cases.items():
+            causal = case.get("causal_analysis") or {}
+            lines.append(
+                f"- `{run_id}` → **{case.get('final_status', 'unknown')}** — "
+                f"{case.get('final_outcome', '')} "
+                f"(layer: `{causal.get('failure_layer', 'unknown')}`)"
+            )
+
     if p and p.orchestrator_artifacts:
         triage = p.orchestrator_artifacts.diagnosis
         lines += [
             "",
-            "## Orchestrator evidence triage",
+            "## Orchestrator target analysis",
             "",
             triage.whole_picture_summary or "(no whole-picture summary)",
         ]
@@ -1495,7 +1562,7 @@ def render_report(result: PipelineResult) -> str:
         triage = result.orchestrator_artifacts["diagnosis"]
         lines += [
             "",
-            "## Partial Orchestrator evidence triage",
+            "## Partial Orchestrator target analysis",
             "",
             str(triage.get("whole_picture_summary") or "(no whole-picture summary)"),
         ]
@@ -1531,13 +1598,18 @@ def render_report(result: PipelineResult) -> str:
     if result.outcome:
         lines += ["", "## Implementation"]
         for t in result.outcome.task_outcomes:
-            lines.append(f"- `{t.task_id}`: {t.status} in {t.rounds} round(s)")
+            lines.append(
+                f"- `{t.task_id}`: {t.status} in {t.rounds} Review Cycle(s)"
+            )
     if result.blocker:
         b = result.blocker
         lines += [
             "",
             "## Blocker",
-            f"- Task `{b.task_id}` did not converge in {b.review_rounds} rounds.",
+            (
+                f"- Task `{b.task_id}` did not converge in "
+                f"{b.review_rounds} Review Cycle(s)."
+            ),
             f"- Recommendation: **{b.recommendation}**",
             f"- Affected tasks: {', '.join(b.affected_tasks) or '(none)'}",
         ]

@@ -82,7 +82,20 @@ flowchart TD
   Orchestrator. Each Loop selects one evidence-backed, currently unsolved Candidate.
 - **Task** is the Loop's one independently implemented and reviewed unit. It may
   touch multiple files for a coherent capability but keeps one objective.
-- **Review Round** is one bounded Writer -> Reviewer attempt for a Task.
+- **Agent Repository** contains the reusable Agent Under Improvement and is the
+  only product source the Writer improves.
+- **Task Workspace** is the disposable project that the target agent edits while
+  attempting an Evaluation Task. Its business features are evidence, not features
+  to copy into the Agent Repository.
+- **Delivery Scenario** is one frozen structured Task Contract, Task Workspace,
+  Observation Contract, environment contract, and Outcome Contract. Each expected
+  result has an ID, explanation of why it matters, and an explicit evidence
+  direction. Positive success, guardrail vetoes, and inconclusive outcomes are
+  separate lists rather than one ambiguous `expected_outputs` list. The
+  structured task is rendered into the target-agent prompt. One Loop has at most one
+  primary Scenario; multiple requirements and observations stay inside it.
+- **Review Cycle** is exactly one bounded Writer Attempt followed by one Reviewer
+  Pass. Their tool-turn budgets are separate and reset on each Cycle.
 - **Delivery** is the Loop-level runnable gate. It runs frozen checks, judges
   whether the selected Candidate is realized, verifies the candidate Git tree
   is unchanged by delivery checks, and accepts the one Loop commit.
@@ -101,10 +114,13 @@ separate.
 
 The Orchestrator receives two histories that must never be conflated:
 
-- **Target-agent trajectory:** the original task prompt, observable target-agent
-  tool calls/results, final response, errors, and outcome. This is diagnostic
+- **Target-agent trajectory:** an append-only JSONL action history containing the
+  rendered task contract, bounded model-component inputs and outputs, linked tool
+  calls/results, usage,
+  final response, errors, and outcome. This is diagnostic
   evidence for deciding what capability to improve. Each run records its
-  `target_commit`, `evidence_source`, and whether it describes the current Loop base.
+  `target_commit`, `evidence_source`, actor/status/sequence fields, and whether it
+  describes the current Loop base.
 - **AgentReforge trajectory:** one record per improvement loop, grouped under a
   stable recursive-run id. It contains the Orchestrator diagnosis/proposal,
   Writer task attempts, Reviewer findings, policy decisions, Deliverer result,
@@ -128,27 +144,44 @@ Candidate-name equality. A renamed refinement of a delivered capability requires
 current-commit evidence; stale baseline behavior is not sufficient justification.
 
 The Orchestrator is one logical component but does not force all reasoning into
-one model call. Its three typed stages use clean contexts and communicate through
+one model call. Its typed stages use clean contexts and communicate through
 durable artifacts:
 
 ```text
 Deterministic Context Compiler
-  -> Evidence Triage
-       input: current alerts, compact run summaries, achievements, repository map
+  -> Workflow Analysis
+       input: previous Reforge Loop records only
+       output: WorkflowDiagnosisBoard (workflow issues + target-backlog exclusions)
+  -> Case Analysis (one independent call per current target run)
+       input: one target-run summary + complete ordered trajectory via read-only tool
+       output: CaseAnalysis (artifact translation + steps + causal/capability signals)
+  -> deterministic case coordinator
+       output: CaseAnalysisBoard keyed by run_id
+  -> Target-Agent Analysis
+       input: CaseAnalysisBoard, filtered backlog, repository map
        output: DiagnosisBoard (alert dispositions + agent-level ProblemCases)
   -> Candidate Selection
        input: DiagnosisBoard, backlog, one-Loop budget, repository summary
        output: SelectionDecision (Candidates + scorecards + Top-2 + frozen winner)
   -> Contract Expansion
        input: frozen winner, relevant evidence references, repository map
-       output: ContractExpansion (one bounded contract + frozen scenarios)
+       output: ContractExpansion (one bounded semantic Change Contract)
+  -> Scenario Definition
+       input: frozen semantic Contract + relevant problem/evidence context
+       output: DeliveryCaseDefinition (task, causal contrast, evidence requirements)
+  -> Scenario Materialization
+       input: frozen Case Definition + target repository launch context
+       output: DeliveryExecutionDesign (workspace, command, evidence bindings)
   -> deterministic coordinator joins SelectionDecision + ContractExpansion
+       + DeliveryCaseDefinition + DeliveryExecutionDesign
        into the final ImprovementProposal
 ```
 
-The stages do not share an accumulating chat history. They exchange typed artifacts,
-and detailed target events remain behind a read-only drill-down tool. Triage must
-account for every current terminal alert, but it is free to defer one with an
+The stages do not share an accumulating chat history. They exchange typed artifacts.
+Case Analysis reads a complete trajectory for exactly one current run, while Target
+Analysis receives the structured CaseAnalysisBoard and drills into cited raw evidence
+only to resolve ambiguity. Target Analysis must account for every current terminal
+alert, but it is free to defer one with an
 evidence-based reason. The task workspace's missing domain feature is a symptom:
 ProblemCases and Candidates must describe reusable target-agent capability and may
 only name target-repository components. Schema or completeness failures are repaired
@@ -158,6 +191,13 @@ Selection cannot be changed during Contract Expansion or later acceptance repair
 The coordinator reattaches the frozen `SelectionDecision` deterministically, so
 contract formatting and scenario revisions cannot switch to an easier Candidate.
 Partial Diagnosis/Selection artifacts are persisted even if a later stage fails.
+
+Mandatory Proposal guardrails are projected into the Writer/Reviewer Task Contract.
+The remaining global Proposal sections are available through a scoped read-only
+`read_proposal(section)` tool for background or consistency verification; they do not
+become additional implementation requirements. The Deliverer receives Proposal
+boundaries only during final Goal Realization, after runtime evidence has been
+collected.
 
 The scorecards are structured LLM deliberation, not a deterministic weighted
 score or policy gate. Problem severity and evidence are assessed before
@@ -223,10 +263,11 @@ read -> reason -> call tools -> edit -> run checks -> report evidence
 The coding agent does not decide whether its own version should be accepted or
 whether AgentReforge should recurse again.
 
-### 5.1 Shared Writer/Reviewer task contract
+### 5.1 Shared compact Writer/Reviewer task contract
 
-The Orchestrator freezes one task contract for both implementation and review. It
-must not generate separate Writer and Reviewer interpretations of the same goal.
+The full Change Contract remains the audit artifact. The coordinator compiles one
+smaller execution contract for both implementation and review; it must not generate
+separate Writer and Reviewer interpretations of the same goal.
 
 ```python
 class ContractClause(BaseModel):
@@ -234,27 +275,24 @@ class ContractClause(BaseModel):
     description: str
 
 
-class ImprovementTask(BaseModel):
-    id: str
-    candidate: str
-    description: str
-    rationale: str
-    capability_change: str
-    required_behaviors: list[ContractClause]
-    implementation_constraints: list[ContractClause]
-    invariants: list[ContractClause]
-    prohibited_shortcuts: list[ContractClause]
-    affected_components: list[str]
-    reviewer_focus: list[str]
+class WriterTaskContract(BaseModel):
+    contract_id: str
+    objective: str
+    capability_delta: str
+    implementation_direction: str
+    requirements: list[ContractClause]
+    constraints: list[ContractClause]
+    non_goals: list[ContractClause]
+    suggested_components: list[str]
     required_safety_properties: list[Literal["path_confinement"]]
-    dependencies: list[str]
-    acceptance_criteria_ids: list[str]
+    acceptance_checks: list[WriterAcceptanceCheck]
 ```
 
-The Writer's implementation hand-off is the task-scoped Git diff and current
-repository state. Writer prose is an optional note with no schema and is never
-treated as evidence. Changed files come from Git; verification comes from the
-Reviewer and AcceptanceRunner rather than self-reported commands or clause claims.
+Writer first emits one short read-only `WriterPlan`, then executes it. Its typed
+handoff contains status, a concise summary, claimed verification, and attempted
+finding resolutions. The task-scoped Git diff remains authoritative; Writer claims
+are navigation context, not acceptance evidence. Changed files come from Git, and
+Reviewer/AcceptanceRunner independently verify behavior.
 
 The Reviewer judges the Loop's frozen Task contract and its authoritative diff,
 including cross-file integration within that one capability. It must not demand a
@@ -262,14 +300,11 @@ pristine worktree or confuse expected product changes with runtime artifacts.
 Runnable delivery and pre/post tree immutability belong to Delivery.
 
 ```text
-Orchestrator -> frozen task contract -> Writer -> task-scoped diff
-                         \----------------------> Reviewer
-Reviewer needs_fix -> evidenced blocking findings -> Writer
+Orchestrator -> compact task -> WriterPlan -> Writer Attempt -> task-scoped diff
+                         \-------------------------------> Reviewer Pass
+Reviewer findings (stable IDs) -> Writer resolutions + repair -> Reviewer Pass
 ```
 
-Only task id, objective, and valid dependencies are required. Candidate ownership,
-clauses, affected components, acceptance hints, and safety-property declarations
-remain available when they clarify the work but are not mandatory schema gates.
 Suggested components do not prevent the Writer from making a necessary integration
 change elsewhere inside the repository worktree.
 
@@ -465,23 +500,24 @@ They do not become commit-blocking merely because an LLM marked them `required`.
 
 ### 9.4 Deliverer boundary
 
-The Deliverer is one conceptual component with two internal parts:
+The Deliverer is one conceptual component with four bounded internal phases:
 
-1. **Runner:** executes minimal end-to-end/smoke commands, explicit safety checks,
-   and capability-specific scenarios frozen by the Orchestrator before the Writer
-   runs. Each scenario supplies a target-agent prompt, safe argv command, isolated
-   fixture workspace, expected/forbidden behaviors, and optional typed executable
-   conditions declared by the Orchestrator. The trusted Runner materializes those
-   conditions without accepting arbitrary environment variables or setup scripts.
-   It records command, exit code, bounded output, changed artifacts, observed
-   environment facts, and a JSONL target-agent trajectory when
-   `requires_trajectory` is frozen. The Pipeline separately compares pre/post
-   candidate tree snapshots.
-2. **Delivery Judge:** receives the Runner records, frozen Orchestrator goal,
-   selected Candidate and causal mechanism, high-level requirements, and complete
-   Loop diff. It decides whether the observed runnable behavior realizes the goal
-   and classifies a rejection as `implementation_defect`, `verification_gap`,
-   `plan_gap`, or `environment_failure`.
+1. **Scenario Readiness:** checks whether the one primary Scenario has a concrete
+   structured Task Contract, literal executable fixture, Observation Contract,
+   environment contract, and capability-distinguishing evidence plan.
+2. **Scenario Execution / Runner:** renders the task form and invokes the target agent
+   in its isolated fixture, plus minimal smoke and declared safety actions. It records
+   command, exit code, bounded output, changed artifacts, environment facts, and JSONL
+   target-agent trajectory. A generous `max_agent_turns` bounds all model turns, while
+   `max_action_steps` counts writes and executions; reads/searches do not consume the
+   action budget.
+3. **Scenario Evidence Analysis:** analyzes only that run's trajectory, artifacts,
+   baseline/candidate predictions, observable difference, and confounders. It emits
+   a bounded evidence card, not the final verdict.
+4. **Goal Realization:** receives the evidence card, frozen proposal/contract, full
+   Loop diff, and universal execution facts. It decides whether the reusable Agent
+   capability was delivered and classifies rejection as `implementation_defect`,
+   `verification_gap`, `plan_gap`, or `environment_failure`.
 
 The Delivery Judge does not repeat function-level code review or targeted unit
 tests and cannot override a deterministic Runner failure. It may interpret actual
@@ -493,8 +529,10 @@ The physical composition is:
 ```text
 Pipeline
   -> DeliveryCoordinator
-       -> AcceptanceRunner.run(proposal, cwd) -> AcceptanceRun
-       -> Deliverer.review(proposal, loop_diff, AcceptanceRun) -> typed GoalReview
+       -> Deliverer Scenario Readiness
+       -> AcceptanceRunner.run_scenario(primary_scenario)
+       -> Deliverer Scenario Evidence Analysis
+       -> Deliverer Goal Realization -> typed GoalReview
        -> Delivery(passed = acceptance.passed and goal.accepted)
 ```
 
@@ -519,16 +557,22 @@ without changing the Orchestrator/Deliverer contract.
 
 For the demo target, Runner automatically resolves `python -m demo_agent` to a
 system-owned adapter. The adapter executes the candidate worktree's real
-`run_task`, wraps its real tool dispatcher, and emits ordered `tool_result` and
-`done` events. Baseline diagnosis and post-change Delivery therefore use the same
+`run_task`, wraps its model call and real tool dispatcher, and emits ordered
+`agent_turn` events with bounded input messages and model output/tool calls, linked
+`tool_result` input/output events, budget facts, and `done` events. Baseline diagnosis and
+post-change Delivery therefore use the same
 trajectory semantics; baseline events are never reused as proof of improved behavior.
+Runner stores this monitoring JSONL beside—not inside—the disposable Task Workspace,
+so the target agent cannot inspect its own monitoring stream or treat it as a task artifact.
 
 Scenario evidence is intentionally typed by observability. Final output and changed
 artifacts can prove externally visible outcomes, but a target's statement that it
 called a tool or verified its work is only self-report. A scenario that judges tool
-use, ordering, inspect-before-edit, or verify-after-edit sets
-`requires_trajectory=true`; missing trajectory then deterministically produces
-`verification_gap` before the LLM Judge runs.
+use, ordering, inspect-before-edit, or verify-after-edit declares structured
+`observations` and sets `requires_trajectory=true`. The Deliverer checks the whole
+sequence—for example edit -> representative test -> interpret result -> repair/finalize—
+rather than accepting the mere presence of a tool name. Missing trajectory then
+deterministically produces `verification_gap`.
 
 When a capability depends on runtime availability, the Orchestrator may freeze
 `executable_conditions` with only a command name and `available|unavailable`
@@ -561,10 +605,12 @@ evidence mechanism, select a different supported Candidate, or abstain.
 It also rejects the same Candidate carrying a safety requirement that already failed,
 even if the model cosmetically rewrites its Scenario.
 
-Reviewer and Deliverer schema failures are returned to the same producer for
-output-only repair. They must never be converted into product-code repair
-instructions for another Agent. Writer has no output schema: its authoritative
-handoff is the Git diff.
+Writer, Reviewer, Deliverer, Planner, and Orchestrator decisions all use typed JSON
+hand-offs. Schema failures are returned to the same producer for output-only repair;
+they must never become product-code repair instructions for another Agent. The
+Writer's structured handoff provides status and explanation, while its task-scoped
+Git diff remains the authoritative implementation artifact. Free-text keyword
+matching is never an approval or completion interface.
 
 ### 9.5 Avoid correlated self-approval
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -13,12 +14,47 @@ Do not edit product code, add requirements, or perform the downstream component'
 job. Preserve the available facts and rewrite only the producer's output so it
 satisfies the supplied interface. Return only the corrected output."""
 
+HANDOFF_FINALIZER_PROMPT = """You are the output stage of an agent component.
+The work/action budget has ended. Produce the required structured handoff from the
+immutable task context and authoritative execution artifacts. Do not call tools,
+continue implementation, invent edits, or treat a self-reported summary as stronger
+than the supplied artifact. Return only one output matching the contract."""
+
 
 @dataclass
 class HandoffRepair:
     text: str
     error: str = ""
     repairs: int = 0
+
+
+async def finalize_handoff_output(
+    client,
+    *,
+    producer: str,
+    contract: str,
+    context: dict,
+) -> str:
+    """Run one budget-independent, tool-free producer output turn."""
+
+    return await collect_text(
+        client,
+        [
+            Message(
+                role="user",
+                content=json.dumps(
+                    {
+                        "request_kind": "finalize_handoff",
+                        "producer": producer,
+                        "output_contract": contract,
+                        "immutable_execution_context": context,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        ],
+        system_prompt=HANDOFF_FINALIZER_PROMPT,
+    )
 
 
 async def repair_handoff_output(
@@ -42,12 +78,16 @@ async def repair_handoff_output(
             [
                 Message(
                     role="user",
-                    content=(
-                        f"Producer: {producer}\n\n"
-                        f"Output contract:\n{contract}\n\n"
-                        f"Validation error:\n{error}\n\n"
-                        f"Immutable context:\n{context[:12_000]}\n\n"
-                        f"Previous invalid output:\n{candidate[:8_000]}"
+                    content=json.dumps(
+                        {
+                            "request_kind": "repair_handoff",
+                            "producer": producer,
+                            "output_contract": contract,
+                            "validation_error": error,
+                            "immutable_context": context[:12_000],
+                            "previous_invalid_output": candidate[:8_000],
+                        },
+                        ensure_ascii=False,
                     ),
                 )
             ],

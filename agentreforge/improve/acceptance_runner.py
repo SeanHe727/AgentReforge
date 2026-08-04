@@ -217,9 +217,14 @@ class AcceptanceRunner:
             workspace = scenario_root / "workspace"
             workspace.mkdir()
             initial = _write_fixture(workspace, scenario.fixture_files)
-            trajectory_path = workspace / ".agentreforge_trajectory.jsonl"
+            # Monitoring evidence belongs to the Deliverer, not to the disposable
+            # Task Workspace visible to the target agent. Keeping it outside the
+            # workspace prevents self-observation, recursive reads, and artifact
+            # contamination while preserving the adapter's private write path.
+            trajectory_path = scenario_root / "target_trajectory.jsonl"
+            prompt = scenario.render_prompt()
             argv = [
-                arg.replace("{prompt}", scenario.prompt).replace(
+                arg.replace("{prompt}", prompt).replace(
                     "{workspace}", str(workspace)
                 )
                 for arg in scenario.command
@@ -235,7 +240,7 @@ class AcceptanceRunner:
             if not environment_ready:
                 return ScenarioRunResult(
                     scenario_id=scenario.id,
-                    prompt=scenario.prompt,
+                    prompt=prompt,
                     command=argv,
                     exit_code=None,
                     output="scenario environment conditions could not be materialized",
@@ -253,9 +258,13 @@ class AcceptanceRunner:
                     "--workspace",
                     str(workspace),
                     "--prompt",
-                    scenario.prompt,
+                    prompt,
                     "--trajectory",
                     str(trajectory_path),
+                    "--max-turns",
+                    str(scenario.budgets.max_agent_turns),
+                    "--max-actions",
+                    str(scenario.budgets.max_action_steps),
                 ]
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -291,7 +300,7 @@ class AcceptanceRunner:
             trajectory = _load_scenario_trajectory(trajectory_path)
             return ScenarioRunResult(
                 scenario_id=scenario.id,
-                prompt=scenario.prompt,
+                prompt=prompt,
                 command=argv,
                 exit_code=exit_code,
                 output=text,
@@ -396,7 +405,7 @@ def _blocked_scenario(
 ) -> ScenarioRunResult:
     return ScenarioRunResult(
         scenario_id=scenario.id,
-        prompt=scenario.prompt,
+        prompt=scenario.render_prompt(),
         command=scenario.command,
         exit_code=None,
         output=f"blocked ({reason})",

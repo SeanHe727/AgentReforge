@@ -15,6 +15,7 @@ from agentreforge.improve.records import (
 from agentreforge.improve.trajectory import (
     append_target_trajectory,
     list_trajectories,
+    load_recent_target_trajectory,
     load_trajectory,
     log_target_trajectory,
     tool_result_is_error,
@@ -27,8 +28,23 @@ def test_target_trajectory_records_prompt_arguments_and_final_response(tmp_path)
     async def run():
         async def events():
             yield {
+                "type": "agent_turn",
+                "turn": 1,
+                "content": "I will inspect the file.",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path":"agent.py"}',
+                        },
+                    }
+                ],
+            }
+            yield {
                 "type": "tool_result",
                 "name": "read_file",
+                "tool_call_id": "call-1",
                 "arguments": {"path": "agent.py", "api_key": "must-not-leak"},
                 "content": "source",
                 "is_error": False,
@@ -55,12 +71,15 @@ def test_target_trajectory_records_prompt_arguments_and_final_response(tmp_path)
     records = load_trajectory(
         str(tmp_path), "target-1", store_root=tmp_path / "traces"
     )
-    assert len(observed) == 2
+    assert len(observed) == 3
     assert records[0]["trajectory_kind"] == "target_agent"
     assert records[0]["task_prompt"] == "add a planning step"
-    assert records[1]["arguments"]["path"] == "agent.py"
-    assert records[1]["arguments"]["api_key"] == "[REDACTED]"
-    assert records[2]["final_response"] == "finished"
+    assert records[1]["type"] == "agent_turn"
+    assert records[1]["tool_calls"][0]["id"] == "call-1"
+    assert records[2]["arguments"]["path"] == "agent.py"
+    assert records[2]["arguments"]["api_key"] == "[REDACTED]"
+    assert records[2]["tool_call_id"] == "call-1"
+    assert records[3]["final_response"] == "finished"
     history_files = list((tmp_path / "traces").rglob("*.jsonl"))
     assert [path.name for path in history_files] == ["trajectory.jsonl"]
 
@@ -104,6 +123,51 @@ def test_legacy_per_session_trajectory_is_imported_once(tmp_path):
     assert len(first) == 1
     assert second == first
     assert (project / "trajectory.jsonl").is_file()
+
+
+def test_recent_trajectory_prioritizes_current_commit_over_newer_branches(
+    tmp_path, monkeypatch
+):
+    store = tmp_path / "traces"
+    cwd = tmp_path / "target"
+    cwd.mkdir()
+    monkeypatch.setattr(
+        "agentreforge.improve.trajectory._current_git_commit",
+        lambda _cwd: "current123",
+    )
+    append_target_trajectory(
+        cwd,
+        [
+            {
+                "session_id": "current-baseline",
+                "run_id": "current-baseline",
+                "type": "done",
+                "target_commit": "current123",
+            }
+        ],
+        store_root=store,
+    )
+    for index in range(4):
+        append_target_trajectory(
+            cwd,
+            [
+                {
+                    "session_id": f"newer-branch-{index}",
+                    "run_id": f"newer-branch-{index}",
+                    "type": "done",
+                    "target_commit": f"branch{index}",
+                }
+            ],
+            store_root=store,
+        )
+
+    selected = load_recent_target_trajectory(
+        str(cwd),
+        sessions=1,
+        store_root=store,
+    )
+
+    assert [record["run_id"] for record in selected] == ["current-baseline"]
 
 
 def test_context_keeps_target_and_reforge_histories_separate(tmp_path):

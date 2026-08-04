@@ -312,6 +312,7 @@ def summarize_target_trajectory(
 
             if event_type in {
                 "target_run_started",
+                "agent_turn",
                 "tool_result",
                 "evaluation_result",
                 "error",
@@ -324,7 +325,12 @@ def summarize_target_trajectory(
                         "trajectory_kind": "target_agent",
                         "run_id": run_id,
                         "type": event_type,
+                        "actor": event.get("actor"),
+                        "status": event.get("status"),
+                        "turn": event.get("turn"),
                         "tool": event.get("name"),
+                        "tool_call_id": event.get("tool_call_id"),
+                        "tool_calls": event.get("tool_calls"),
                         "arguments": event.get("arguments"),
                         "is_error": (
                             normalized_error
